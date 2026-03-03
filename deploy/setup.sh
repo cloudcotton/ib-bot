@@ -15,7 +15,7 @@ BOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"   # 即 git clone 的根目录
 # ── 可修改变量 ────────────────────────────────────────────────
 IBC_DIR="/opt/ibc"
 GATEWAY_DIR="/opt/ibgateway"
-IBC_VERSION="3.19.0"     # 见 https://github.com/IbcAlpha/IBC/releases
+IBC_VERSION="3.23.0"     # 见 https://github.com/IbcAlpha/IBC/releases
 BOT_PORT="8001"
 
 echo "=============================="
