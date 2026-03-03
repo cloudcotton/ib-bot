@@ -1,0 +1,25 @@
+[Unit]
+Description=IB Stop-Loss Bot (FastAPI)
+After=network-online.target ibgateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__BOT_DIR__
+
+ExecStart=__BOT_DIR__/venv/bin/python run.py --host 0.0.0.0 --port __BOT_PORT__
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ib-bot
+
+[Install]
+WantedBy=multi-user.target

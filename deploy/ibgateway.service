@@ -1,0 +1,22 @@
+[Unit]
+Description=IB Gateway (Xvfb + IBC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+
+ExecStart=/usr/local/bin/start_ibgateway.sh
+
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ibgateway
+
+[Install]
+WantedBy=multi-user.target

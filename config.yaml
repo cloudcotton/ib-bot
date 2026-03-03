@@ -1,0 +1,77 @@
+# ============================================================
+# IB Stop-Loss Bot 配置文件
+# ============================================================
+
+# ── IB 连接（亦可通过 .env 覆盖）──────────────────────────
+ib:
+  host: "127.0.0.1"
+  port: 4001          # TWS 模拟: 7497 | 实盘: 7496 | Gateway 模拟: 4002 | 实盘: 4001
+  client_id: 1
+
+# ── 监控合约列表 ──────────────────────────────────────────
+# 支持的 exchange: CME (美股指数期货), HKFE (港股指数期货)
+# 支持的 timeframe: 1m / 5m / 15m / 30m / 1h / 2h / 4h / 1d
+# expiry: "" = 自动取近月合约, "202506" = 指定到期月
+contracts:
+  - symbol: "ES"          # E-mini S&P 500
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    use_rth: false        # false = 监控全时段 (适合几乎 23 小时交易的美指期货)
+    enabled: true
+
+  - symbol: "MES"         # Micro E-mini S&P 500
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    use_rth: false
+    enabled: false        # 默认关闭，按需启用
+
+  - symbol: "NQ"          # E-mini Nasdaq-100
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    use_rth: false
+    enabled: false
+
+  - symbol: "MNQ"         # Micro E-mini Nasdaq-100
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    use_rth: false
+    enabled: false
+
+  - symbol: "HSI"         # 恒生指数期货
+    exchange: "HKFE"
+    currency: "HKD"
+    timeframe: "5m"
+    expiry: ""
+    use_rth: true         # true = 仅正常交易时段（港股期货有午休）
+    enabled: false
+
+  - symbol: "MHI"         # 小型恒生指数期货
+    exchange: "HKFE"
+    currency: "HKD"
+    timeframe: "5m"
+    expiry: ""
+    use_rth: true
+    enabled: true
+
+# ── 止损策略参数 ──────────────────────────────────────────
+strategy:
+  # 双K止损平仓逻辑：
+  #   平多: 当前价 ≤ Kn低点 且 当前价 < min(K-1低, K-2低)
+  #   平空: 当前价 ≥ Kn高点 且 当前价 > max(K-1高, K-2高)
+  signal_enabled: true     # 双K止损开关（重启后保持此状态）
+  signal_cooldown_sec: 30  # 同合约同方向触发后的冷却时间（秒）
+
+# ── 通知 ──────────────────────────────────────────────────
+notify:
+  enabled: true
+  telegram_bot_token: "8395848682:AAFuc5cWbiLQsz9dwnzqFY0AE8aM_UH0n28"   # 也可写在 .env 中
+  telegram_chat_id: "1889396272"
+  min_interval_sec: 10

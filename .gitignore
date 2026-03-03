@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+logs/
+*.log
+.env
+
+# IBC 实际配置（含账号密码，由 setup.sh 在 VPS 上生成）
+/opt/ibc/config.ini
