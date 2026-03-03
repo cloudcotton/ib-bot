@@ -26,7 +26,7 @@ echo "=============================="
 # ── 1. 系统依赖 ──────────────────────────────────────────────
 echo ""
 echo ">>> [1/4] 安装系统依赖..."
-apt-get update -q
+apt-get update -q || { echo "    警告: apt-get update 有仓库错误（已忽略），继续安装..."; true; }
 apt-get install -y -q \
     xvfb \
     default-jre-headless \
