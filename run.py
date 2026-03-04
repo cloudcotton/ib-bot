@@ -18,7 +18,7 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description="IB Stop-Loss Bot")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
     # ── Windows 事件循环修复 ──────────────────────────────────────────────
