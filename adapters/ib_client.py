@@ -94,7 +94,8 @@ class IBClient:
         await self._fetch_initial_positions()
 
         # 订阅账户数值实时推送（重连后需重新订阅）
-        self.ib.reqAccountUpdates(True, self._account or "")
+        # ib_insync 已隐藏 subscribe 参数，只传账户号即可
+        self.ib.reqAccountUpdates(self._account or "")
         logger.info("已订阅账户数值更新")
 
     async def disconnect(self) -> None:
