@@ -272,6 +272,7 @@ class TradingEngine:
         self._stopping = False
         self._reconnect_task: Optional[asyncio.Task] = None
         self._reconnect_attempt = 0
+        self._resubscribe_task: Optional[asyncio.Task] = None  # 10182 触发的定向重订阅
 
     # ── 生命周期 ───────────────────────────────────────────────────────────
 
@@ -290,6 +291,7 @@ class TradingEngine:
 
         self.ib_client.register_position_callback(self._on_position_update)
         self.ib_client.ib.disconnectedEvent += self._on_disconnected
+        self.ib_client.ib.errorEvent       += self._on_ib_error
 
         for cfg in self.settings.active_contracts:
             await self._init_monitor(cfg)
@@ -504,6 +506,24 @@ class TradingEngine:
             self._reconnect_task = _safe_ensure_future(
                 self._reconnect_loop(), label="_reconnect_loop"
             )
+
+    def _on_ib_error(self, reqId: int, errorCode: int, errorString: str, contract) -> None:
+        """监听 IB 错误码，对关键错误做自动恢复。
+
+        10182 — Failed to request live updates (disconnected)：
+            数据农场断开重连后，keepUpToDate K线推送流被服务端强制掐断。
+            引擎仍在线（_running=True），但所有合约实质上已"失聪"。
+            解决：立即触发 _resubscribe_all 重新拉取 K 线历史 + 恢复推送。
+            去重：用 _resubscribe_task 确保多个 10182 只触发一次重订阅。
+        """
+        if errorCode == 10182 and self._running and not self._stopping:
+            if self._resubscribe_task is None or self._resubscribe_task.done():
+                logger.warning(
+                    f"K线推送流断开 (10182 reqId={reqId})，自动重新订阅所有合约…"
+                )
+                self._resubscribe_task = _safe_ensure_future(
+                    self._resubscribe_all(), label="_resubscribe_all(10182)"
+                )
 
     async def _reconnect_loop(self) -> None:
         self._reconnect_attempt = 0
