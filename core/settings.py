@@ -33,6 +33,7 @@ class ContractConfig(BaseModel):
     currency: str
     timeframe: str = "5m"
     expiry: str = ""          # "" = 自动取近月合约
+    multiplier: float = 1.0   # 合约乘数（静态配置，优先于 IB 动态返回）
     use_rth: bool = False
     enabled: bool = True
 

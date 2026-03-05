@@ -18,6 +18,7 @@ contracts:
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    multiplier: 50        # 固定合约乘数，避免 IB 接口瞬时异常导致均价失真
     use_rth: false        # false = 监控全时段 (适合几乎 23 小时交易的美指期货)
     enabled: true
 
@@ -26,6 +27,7 @@ contracts:
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    multiplier: 5
     use_rth: false
     enabled: false        # 默认关闭，按需启用
 
@@ -34,6 +36,7 @@ contracts:
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    multiplier: 20
     use_rth: false
     enabled: false
 
@@ -42,6 +45,7 @@ contracts:
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    multiplier: 2
     use_rth: false
     enabled: false
 
@@ -50,6 +54,7 @@ contracts:
     currency: "HKD"
     timeframe: "5m"
     expiry: ""
+    multiplier: 50
     use_rth: true         # true = 仅正常交易时段（港股期货有午休）
     enabled: false
 
@@ -58,6 +63,7 @@ contracts:
     currency: "HKD"
     timeframe: "5m"
     expiry: ""
+    multiplier: 10
     use_rth: true
     enabled: true
 

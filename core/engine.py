@@ -62,8 +62,9 @@ class ContractMonitor:
         self._stop_trade = None                       # ib_insync Trade 对象
         self._stop_price: Optional[float] = None      # 当前止损价
 
-        # 三根K线退出逻辑状态
+        # 平仓执行状态
         self._in_flight: bool = False
+        self._close_lock = asyncio.Lock()        # 防止异步重入
         self._last_signal_time: dict[str, datetime] = {}
         self._last_signal: Optional[str] = None
 
@@ -74,11 +75,9 @@ class ContractMonitor:
         self._position = qty
         if qty != 0 and avg_cost:
             # IB 期货的 avgCost = 成交价 × 合约乘数，需除以乘数还原为价格
-            try:
-                mult = float(self.contract.multiplier) if self.contract.multiplier else 1.0
-            except (ValueError, TypeError):
-                mult = 1.0
-            self._entry_price = avg_cost / mult if mult else avg_cost
+            # 乘数取自静态配置，避免 IB 接口瞬时返回异常导致均价失真
+            mult = self.cfg.multiplier or 1.0
+            self._entry_price = avg_cost / mult
         elif qty == 0:
             self._entry_price = None
             # 持仓归零时清理止损状态（止损单可能已被 IB 执行）
@@ -142,32 +141,39 @@ class ContractMonitor:
             return
         if self._in_flight:
             return
+        # 在同步段立即置位，防止后续 Tick 回调在 _execute_close 启动前再次进入
+        self._in_flight = True
         self._last_signal_time[signal.value] = now
         self._last_signal = signal.value
         logger.info(f"[{self.cfg.key}] 双K止损信号: {signal.value} 持仓={self._position}")
         asyncio.ensure_future(self._execute_close(signal, reason="双K止损"))
 
     async def _execute_close(self, signal: Signal, reason: str = "") -> None:
-        self._in_flight = True
-        pos_qty = self._position
-        try:
-            # 先撤销 IB 止损单（避免重复平仓）
-            await self._cancel_stop_order()
-
-            success = await self._ib.close_position(self.contract, pos_qty)
-            if success and self._notifier:
-                price = self.buffer.current.close if self.buffer.current else 0.0
-                self._notifier.notify_close(
-                    symbol=self.cfg.symbol,
-                    exchange=self.cfg.exchange,
-                    direction=signal.value,
-                    qty=abs(pos_qty),
-                    price=price,
-                )
-        except Exception as e:
-            logger.error(f"[{self.cfg.key}] 执行平仓异常: {e}")
-        finally:
+        # Lock 确保即使多个协程同时被调度，平仓逻辑也绝对串行执行
+        if self._close_lock.locked():
+            logger.debug(f"[{self.cfg.key}] 平仓已在进行中，丢弃重复信号")
             self._in_flight = False
+            return
+        async with self._close_lock:
+            pos_qty = self._position
+            try:
+                # 先撤销 IB 止损单（避免重复平仓）
+                await self._cancel_stop_order()
+
+                success = await self._ib.close_position(self.contract, pos_qty)
+                if success and self._notifier:
+                    price = self.buffer.current.close if self.buffer.current else 0.0
+                    self._notifier.notify_close(
+                        symbol=self.cfg.symbol,
+                        exchange=self.cfg.exchange,
+                        direction=signal.value,
+                        qty=abs(pos_qty),
+                        price=price,
+                    )
+            except Exception as e:
+                logger.error(f"[{self.cfg.key}] 执行平仓异常: {e}")
+            finally:
+                self._in_flight = False
 
     # ── 止损单操作 ────────────────────────────────────────────────────────
 

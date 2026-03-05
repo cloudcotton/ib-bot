@@ -285,16 +285,38 @@ class IBClient:
             logger.info(f"下单平仓: {contract.symbol} {action} {qty} @ MARKET")
             try:
                 trade = self.ib.placeOrder(contract, order)
-                for _ in range(60):
-                    await asyncio.sleep(0.5)
-                    if trade.isDone():
-                        break
-                if trade.isDone():
-                    logger.info(f"平仓完成: {contract.symbol} avgFill={trade.orderStatus.avgFillPrice}")
-                    return True
-                else:
+
+                # 用 Future + 事件回调代替轮询，响应更及时
+                loop = asyncio.get_running_loop()
+                fut: asyncio.Future[bool] = loop.create_future()
+
+                def _on_filled(t):
+                    if not fut.done():
+                        fut.set_result(True)
+
+                def _on_cancelled(t):
+                    if not fut.done():
+                        fut.set_result(False)
+
+                trade.filledEvent += _on_filled
+                trade.cancelledEvent += _on_cancelled
+
+                try:
+                    success = await asyncio.wait_for(fut, timeout=30.0)
+                    if success:
+                        logger.info(
+                            f"平仓完成: {contract.symbol} avgFill={trade.orderStatus.avgFillPrice}"
+                        )
+                    else:
+                        logger.warning(f"平仓订单被取消: {contract.symbol}")
+                    return success
+                except asyncio.TimeoutError:
                     logger.warning(f"平仓订单 30s 内未成交: {contract.symbol}")
                     return False
+                finally:
+                    trade.filledEvent -= _on_filled
+                    trade.cancelledEvent -= _on_cancelled
+
             except Exception as e:
                 logger.error(f"平仓下单异常: {contract.symbol}: {e}")
                 return False
