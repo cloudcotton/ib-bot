@@ -29,6 +29,19 @@ logger = logging.getLogger(__name__)
 _RECONNECT_DELAYS = [5, 10, 30, 60, 120, 300]
 
 
+def _safe_ensure_future(coro, label: str = "") -> asyncio.Task:
+    """asyncio.ensure_future 的安全包装：后台协程若抛出未捕获异常，
+    通过 done_callback 记录完整 traceback，防止异常被静默吞没。"""
+    task = asyncio.ensure_future(coro)
+
+    def _on_done(t: asyncio.Task) -> None:
+        if not t.cancelled() and (exc := t.exception()):
+            logger.error(f"后台任务异常 [{label}]", exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
+
+
 # ── ContractMonitor ────────────────────────────────────────────────────────
 
 
@@ -80,9 +93,15 @@ class ContractMonitor:
             self._entry_price = avg_cost / mult
         elif qty == 0:
             self._entry_price = None
-            # 持仓归零时清理止损状态（止损单可能已被 IB 执行）
             self._stop_price = None
-            self._stop_trade = None
+            if self._stop_trade is not None:
+                # 持仓归零（IB 强平或保证金不足触发），主动撤销残留止损单。
+                # 若止损单尚未触发，孤立订单可能在后续行情中意外反向开仓。
+                # _cancel_stop_order 异步执行，由它负责将 _stop_trade 置 None。
+                _safe_ensure_future(self._cancel_stop_order(),
+                                    label=f"{self.cfg.key} 强平后撤止损")
+            else:
+                self._stop_trade = None
         if old != qty:
             logger.info(f"[{self.cfg.key}] 持仓: {old} → {qty}  均价={avg_cost:.4f}")
 
@@ -97,7 +116,7 @@ class ContractMonitor:
                 # bars[-1] = 当前未完成K线，bars[:-1] = 已完成K线列表
                 self._initialized = True
                 completed = list(bars[:-1])
-                for b in completed[-2:]:    # 取最后2根已完成K线预热缓冲区
+                for b in completed[-24:]:   # 取最多24根预热（EMA20 需要 20 根种子）
                     self.buffer.add_completed(Bar(
                         time=str(b.date), open=float(b.open), high=float(b.high),
                         low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
@@ -109,7 +128,8 @@ class ContractMonitor:
                 ))
                 logger.info(
                     f"[{self.cfg.key}] K线缓冲区预热完成"
-                    f"（历史 {len(self.buffer.completed)} 根，ready={self.buffer.ready}）"
+                    f"（历史 {len(self.buffer.completed)} 根，ready={self.buffer.ready}"
+                    f"，ema20={self.buffer.ema20}）"
                 )
             else:
                 if has_new_bar and len(bars) >= 2:
@@ -146,7 +166,8 @@ class ContractMonitor:
         self._last_signal_time[signal.value] = now
         self._last_signal = signal.value
         logger.info(f"[{self.cfg.key}] 双K止损信号: {signal.value} 持仓={self._position}")
-        asyncio.ensure_future(self._execute_close(signal, reason="双K止损"))
+        _safe_ensure_future(self._execute_close(signal, reason="双K止损"),
+                            label=f"{self.cfg.key} _execute_close")
 
     async def _execute_close(self, signal: Signal, reason: str = "") -> None:
         # Lock 确保即使多个协程同时被调度，平仓逻辑也绝对串行执行
@@ -221,6 +242,7 @@ class ContractMonitor:
                 if self._last_signal and self._last_signal in self._last_signal_time
                 else None
             ),
+            "ema20": round(buf.ema20, 4) if buf.ema20 is not None else None,
             "current_bar": current.to_dict() if current else None,
             "k1": k1.to_dict() if k1 else None,
             "k2": k2.to_dict() if k2 else None,
@@ -362,8 +384,9 @@ class TradingEngine:
             def on_entry_filled(t):
                 fill = t.orderStatus.avgFillPrice
                 logger.info(f"[{key}] 开仓成交: {_direction} {_qty} @ {fill}")
-                asyncio.ensure_future(
-                    self._submit_stop(monitor, _direction, _qty, _stop_price)
+                _safe_ensure_future(
+                    self._submit_stop(monitor, _direction, _qty, _stop_price),
+                    label=f"{key} _submit_stop",
                 )
 
             trade.filledEvent += on_entry_filled
@@ -468,7 +491,9 @@ class TradingEngine:
         if self._notifier:
             self._notifier.notify_disconnected()
         if self._reconnect_task is None or self._reconnect_task.done():
-            self._reconnect_task = asyncio.ensure_future(self._reconnect_loop())
+            self._reconnect_task = _safe_ensure_future(
+                self._reconnect_loop(), label="_reconnect_loop"
+            )
 
     async def _reconnect_loop(self) -> None:
         self._reconnect_attempt = 0
