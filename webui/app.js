@@ -71,39 +71,48 @@ function syncSignalToggle(enabled) {
 
 // ── 账户权益栏 ──────────────────────────────────────────────────────────
 function renderAccount(acct) {
-  // 从 {BASE: "x", USD: "y", ...} 中取最合适的值
-  // 优先取非 BASE 的货币（USD/HKD），BASE 通常是换算后的总值
-  function pickVal(obj) {
-    if (!obj || !Object.keys(obj).length) return null;
-    return obj['USD'] ?? obj['HKD'] ?? obj['BASE'] ?? Object.values(obj)[0];
-  }
-  function pickCcy(obj) {
-    if (!obj) return '';
-    return Object.keys(obj).find(k => k !== 'BASE') ?? Object.keys(obj)[0] ?? '';
+  // BASE = IB 将所有币种折算为账户基础货币的合并总权益，必须最优先。
+  // 多币种账户（如同时跑 ES+HSI）若优先取 USD，港币部分权益会被丢弃。
+  function pickPrimary(obj) {
+    if (!obj || !Object.keys(obj).length) return { val: null, ccy: '' };
+    if (obj['BASE'] != null) return { val: obj['BASE'], ccy: 'BASE' };
+    if (obj['USD']  != null) return { val: obj['USD'],  ccy: 'USD'  };
+    if (obj['HKD']  != null) return { val: obj['HKD'],  ccy: 'HKD'  };
+    const k = Object.keys(obj)[0];
+    return { val: obj[k], ccy: k };
   }
 
-  const nl  = pickVal(acct.NetLiquidation);
-  const pnl = pickVal(acct.UnrealizedPnL);
-  const af  = pickVal(acct.AvailableFunds);
-  const ccy = pickCcy(acct.NetLiquidation);
+  const { val: nl,  ccy: nlCcy } = pickPrimary(acct.NetLiquidation);
+  const { val: pnl }             = pickPrimary(acct.UnrealizedPnL);
+  const { val: rpnl }            = pickPrimary(acct.RealizedPnL);
+  const { val: af }              = pickPrimary(acct.AvailableFunds);
 
-  // 净值
+  // 账户净值（BASE 时不显示货币标签，单币种账户正常显示）
   const nlEl = document.getElementById('acct-net-liq');
-  nlEl.textContent = nl != null ? `${fmtAcct(nl)}${ccy ? ' ' + ccy : ''}` : '—';
+  nlEl.textContent = nl != null
+    ? `${fmtAcct(nl)}${nlCcy && nlCcy !== 'BASE' ? ' ' + nlCcy : ''}`
+    : '—';
 
-  // 浮动盈亏（带颜色）
-  const pnlEl = document.getElementById('acct-unrealized-pnl');
-  if (pnl != null) {
-    const n = parseFloat(pnl);
-    pnlEl.textContent = (n >= 0 ? '+' : '') + fmtAcct(pnl);
-    pnlEl.className = 'acct-val ' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '');
-  } else {
-    pnlEl.textContent = '—';
-    pnlEl.className = 'acct-val';
-  }
+  // 持仓浮盈（UnrealizedPnL，仅当前未平仓头寸）
+  setPnlEl('acct-unrealized-pnl', pnl);
+
+  // 已实现盈亏（RealizedPnL，当前 IB session 内已平仓盈亏）
+  setPnlEl('acct-realized-pnl', rpnl);
 
   // 可用资金
   document.getElementById('acct-avail-funds').textContent = af != null ? fmtAcct(af) : '—';
+}
+
+function setPnlEl(id, val) {
+  const el = document.getElementById(id);
+  if (val != null) {
+    const n = parseFloat(val);
+    el.textContent = (n >= 0 ? '+' : '') + fmtAcct(val);
+    el.className = 'acct-val ' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '');
+  } else {
+    el.textContent = '—';
+    el.className = 'acct-val';
+  }
 }
 
 function fmtAcct(v) {

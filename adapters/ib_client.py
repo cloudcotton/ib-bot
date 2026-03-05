@@ -66,9 +66,11 @@ class IBClient:
         self._position_callbacks: list[Callable[[int, float, float], None]] = []
 
         # 账户数值缓存: "TAG/CURRENCY" -> value_str
-        # 关注字段: NetLiquidation(总净值) / UnrealizedPnL(浮动盈亏) / AvailableFunds(可用资金)
+        # 关注字段: NetLiquidation(总净值) / UnrealizedPnL(持仓浮盈) /
+        #           RealizedPnL(当前session已实现) / AvailableFunds(可用资金)
         self._account_data: dict[str, str] = {}
-        self.ib.accountValueEvent += self._on_account_value  # 注册一次，重连后持续有效
+        self.ib.accountValueEvent  += self._on_account_value   # 注册一次，重连后持续有效
+        self.ib.disconnectedEvent  += self._on_ib_disconnected  # 断线时清空缓存
 
     # ── 连接管理 ──────────────────────────────────────────────────────────
 
@@ -205,11 +207,16 @@ class IBClient:
     # ── 账户数值 ──────────────────────────────────────────────────────────
 
     def _on_account_value(self, val) -> None:
-        """IB 推送账户数值时缓存关键字段（NetLiquidation / UnrealizedPnL / AvailableFunds）。"""
+        """IB 推送账户数值时缓存关键字段。"""
         if self._account and val.account != self._account:
             return
-        if val.tag in ("NetLiquidation", "UnrealizedPnL", "AvailableFunds"):
+        if val.tag in ("NetLiquidation", "UnrealizedPnL", "RealizedPnL", "AvailableFunds"):
             self._account_data[f"{val.tag}/{val.currency}"] = val.value
+
+    def _on_ib_disconnected(self) -> None:
+        """IB 断线时立即清空账户数值缓存，防止前端在重连期间显示过期数据。"""
+        self._account_data.clear()
+        logger.debug("IB 断线：账户数值缓存已清空")
 
     def get_account_summary(self) -> dict:
         """返回账户关键数值快照，格式：{tag: {currency: value_str}}。
