@@ -336,7 +336,7 @@ class TradingEngine:
         avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
         monitor.update_position(qty, avg_cost)
 
-        bars = self.ib_client.subscribe_bars(
+        bars = await self.ib_client.subscribe_bars(
             contract=ib_contract, timeframe=cfg.timeframe,
             use_rth=cfg.use_rth, callback=monitor.on_bars_update,
         )
@@ -533,7 +533,7 @@ class TradingEngine:
             monitor.buffer.reset()
             monitor._initialized = False
             try:
-                bars = self.ib_client.subscribe_bars(
+                bars = await self.ib_client.subscribe_bars(
                     contract=monitor.contract, timeframe=monitor.cfg.timeframe,
                     use_rth=monitor.cfg.use_rth, callback=monitor.on_bars_update,
                 )

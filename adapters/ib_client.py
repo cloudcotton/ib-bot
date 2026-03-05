@@ -151,7 +151,7 @@ class IBClient:
 
     # ── K 线订阅 ──────────────────────────────────────────────────────────
 
-    def subscribe_bars(
+    async def subscribe_bars(
         self,
         contract,
         timeframe: str,
@@ -161,7 +161,8 @@ class IBClient:
         bar_size = _BAR_SIZE.get(timeframe, "5 mins")
         duration = _DURATION.get(timeframe, "2 D")
         logger.info(f"订阅 K 线: {contract.symbol} {bar_size} duration={duration} useRTH={use_rth}")
-        bars = self.ib.reqHistoricalData(
+        # reqHistoricalData 同步版会阻塞事件循环，改用 async 版本
+        bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
             durationStr=duration,
