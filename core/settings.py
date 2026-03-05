@@ -62,11 +62,17 @@ class NotifyConfig(BaseModel):
     min_interval_sec: int = 10
 
 
+class EquityLogConfig(BaseModel):
+    enabled: bool = True
+    record_time: str = "17:00"    # 每日记录时刻，"HH:MM"，与服务器本地时区一致
+
+
 class Settings(BaseModel):
     ib: IBConfig = IBConfig()
     contracts: list[ContractConfig] = []
     strategy: StrategyConfig = StrategyConfig()
     notify: NotifyConfig = NotifyConfig()
+    equity_log: EquityLogConfig = EquityLogConfig()
 
     # 账户（从 .env 读取）
     ib_account: str = ""

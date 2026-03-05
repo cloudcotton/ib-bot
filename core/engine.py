@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Optional
 
 from adapters.ib_client import IBClient
+from core.equity_recorder import EquityRecorder
 from core.kline_manager import Bar, KlineBuffer
 from core.notifier import TelegramNotifier
 from core.settings import ContractConfig, Settings, save_settings
@@ -266,6 +267,7 @@ class TradingEngine:
         )
         self._monitors: dict[str, ContractMonitor] = {}
         self._notifier: Optional[TelegramNotifier] = None
+        self._equity_recorder: Optional[EquityRecorder] = None
         self._running = False
         self._stopping = False
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -292,6 +294,12 @@ class TradingEngine:
         for cfg in self.settings.active_contracts:
             await self._init_monitor(cfg)
 
+        # 启动净值定时记录器
+        elc = self.settings.equity_log
+        if elc.enabled:
+            self._equity_recorder = EquityRecorder(self.ib_client, elc.record_time)
+            self._equity_recorder.start()
+
         self._running = True
         logger.info(f"引擎就绪，监控 {len(self._monitors)} 个合约")
 
@@ -299,6 +307,8 @@ class TradingEngine:
         logger.info("引擎停止中…")
         self._stopping = True
         self._running = False
+        if self._equity_recorder:
+            self._equity_recorder.stop()
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
             try:

@@ -67,6 +67,11 @@ contracts:
     use_rth: true
     enabled: true
 
+# ── 账户净值定时记录 ───────────────────────────────────────
+equity_log:
+  enabled: true
+  record_time: "17:00"    # 每日记录时刻（服务器本地时间 HH:MM）
+
 # ── 止损策略参数 ──────────────────────────────────────────
 strategy:
   # 双K止损平仓逻辑：
