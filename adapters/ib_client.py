@@ -93,10 +93,17 @@ class IBClient:
         self.ib.positionEvent += self._on_position_event
         await self._fetch_initial_positions()
 
-        # 订阅账户数值实时推送（重连后需重新订阅）
-        # ib_insync 已隐藏 subscribe 参数，只传账户号即可
-        self.ib.reqAccountUpdates(self._account or "")
-        logger.info("已订阅账户数值更新")
+        # reqAccountUpdates 在 ib_insync 内部会调用 run() 等待数据返回，
+        # 在 async 协程中调用会阻塞事件循环导致启动卡死。
+        # 改用真正 async 的 reqAccountSummaryAsync 做一次性快照拉取；
+        # accountValueEvent 仍保持注册，IB 主动推送时会实时更新缓存。
+        try:
+            summary = await self.ib.reqAccountSummaryAsync()
+            for val in summary:
+                self._on_account_value(val)
+            logger.info(f"已获取账户数值快照（{len(self._account_data)} 项）")
+        except Exception as e:
+            logger.warning(f"获取账户数值快照失败，权益显示可能延迟: {e}")
 
     async def disconnect(self) -> None:
         if self._connected:
