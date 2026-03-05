@@ -57,6 +57,44 @@ header {
 
 .clock { color: var(--text-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
 
+/* ── Account Equity Bar ── */
+.account-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  padding: 8px 24px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+
+.acct-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 24px 4px 0;
+  margin-right: 24px;
+  border-right: 1px solid var(--border);
+}
+.acct-item:last-child { border-right: none; margin-right: 0; }
+
+.acct-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+
+.acct-val {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.acct-val.pos { color: var(--green); }
+.acct-val.neg { color: var(--red);   }
+
 /* ── Main ── */
 main {
   max-width: 1200px;

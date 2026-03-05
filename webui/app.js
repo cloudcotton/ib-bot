@@ -54,6 +54,7 @@ fetchStatus();
 function render(data) {
   setConnBadge(data);
   syncSignalToggle(data.signal_enabled !== false);
+  renderAccount(data.account || {});
   renderContracts(data.contracts || []);
   syncSelects(data.contracts || []);
 }
@@ -66,6 +67,49 @@ function syncSignalToggle(enabled) {
     lbl.textContent = enabled ? '已启用' : '已暂停';
     lbl.className   = 'toggle-label ' + (enabled ? 'on' : 'off');
   }
+}
+
+// ── 账户权益栏 ──────────────────────────────────────────────────────────
+function renderAccount(acct) {
+  // 从 {BASE: "x", USD: "y", ...} 中取最合适的值
+  // 优先取非 BASE 的货币（USD/HKD），BASE 通常是换算后的总值
+  function pickVal(obj) {
+    if (!obj || !Object.keys(obj).length) return null;
+    return obj['USD'] ?? obj['HKD'] ?? obj['BASE'] ?? Object.values(obj)[0];
+  }
+  function pickCcy(obj) {
+    if (!obj) return '';
+    return Object.keys(obj).find(k => k !== 'BASE') ?? Object.keys(obj)[0] ?? '';
+  }
+
+  const nl  = pickVal(acct.NetLiquidation);
+  const pnl = pickVal(acct.UnrealizedPnL);
+  const af  = pickVal(acct.AvailableFunds);
+  const ccy = pickCcy(acct.NetLiquidation);
+
+  // 净值
+  const nlEl = document.getElementById('acct-net-liq');
+  nlEl.textContent = nl != null ? `${fmtAcct(nl)}${ccy ? ' ' + ccy : ''}` : '—';
+
+  // 浮动盈亏（带颜色）
+  const pnlEl = document.getElementById('acct-unrealized-pnl');
+  if (pnl != null) {
+    const n = parseFloat(pnl);
+    pnlEl.textContent = (n >= 0 ? '+' : '') + fmtAcct(pnl);
+    pnlEl.className = 'acct-val ' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '');
+  } else {
+    pnlEl.textContent = '—';
+    pnlEl.className = 'acct-val';
+  }
+
+  // 可用资金
+  document.getElementById('acct-avail-funds').textContent = af != null ? fmtAcct(af) : '—';
+}
+
+function fmtAcct(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return String(v);
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function setConnBadge(data) {

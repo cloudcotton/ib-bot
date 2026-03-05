@@ -565,6 +565,7 @@ class TradingEngine:
             "reconnecting": reconnecting,
             "reconnect_attempt": self._reconnect_attempt if reconnecting else 0,
             "signal_enabled": self.settings.strategy.signal_enabled,
+            "account": self.ib_client.get_account_summary(),
             "contracts": [m.get_status() for m in self._monitors.values()],
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }

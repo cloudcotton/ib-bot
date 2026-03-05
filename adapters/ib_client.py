@@ -65,6 +65,11 @@ class IBClient:
         # 持仓变动回调: (conId, qty, avg_cost)
         self._position_callbacks: list[Callable[[int, float, float], None]] = []
 
+        # 账户数值缓存: "TAG/CURRENCY" -> value_str
+        # 关注字段: NetLiquidation(总净值) / UnrealizedPnL(浮动盈亏) / AvailableFunds(可用资金)
+        self._account_data: dict[str, str] = {}
+        self.ib.accountValueEvent += self._on_account_value  # 注册一次，重连后持续有效
+
     # ── 连接管理 ──────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
@@ -85,6 +90,10 @@ class IBClient:
 
         self.ib.positionEvent += self._on_position_event
         await self._fetch_initial_positions()
+
+        # 订阅账户数值实时推送（重连后需重新订阅）
+        self.ib.reqAccountUpdates(True, self._account or "")
+        logger.info("已订阅账户数值更新")
 
     async def disconnect(self) -> None:
         if self._connected:
@@ -192,6 +201,32 @@ class IBClient:
         logger.debug(f"持仓更新: conId={con_id} qty={qty} avgCost={avg_cost}")
         for cb in self._position_callbacks:
             cb(con_id, qty, avg_cost)
+
+    # ── 账户数值 ──────────────────────────────────────────────────────────
+
+    def _on_account_value(self, val) -> None:
+        """IB 推送账户数值时缓存关键字段（NetLiquidation / UnrealizedPnL / AvailableFunds）。"""
+        if self._account and val.account != self._account:
+            return
+        if val.tag in ("NetLiquidation", "UnrealizedPnL", "AvailableFunds"):
+            self._account_data[f"{val.tag}/{val.currency}"] = val.value
+
+    def get_account_summary(self) -> dict:
+        """返回账户关键数值快照，格式：{tag: {currency: value_str}}。
+
+        示例：
+            {
+              "NetLiquidation":  {"USD": "500000.00"},
+              "UnrealizedPnL":   {"USD": "1234.50"},
+              "AvailableFunds":  {"USD": "450000.00"},
+            }
+        空字典表示尚未收到 IB 推送（连接后约 1~2 秒到达）。
+        """
+        result: dict[str, dict[str, str]] = {}
+        for key, value in self._account_data.items():
+            tag, currency = key.split("/", 1)
+            result.setdefault(tag, {})[currency] = value
+        return result
 
     # ── 开仓下单 ──────────────────────────────────────────────────────────
 
