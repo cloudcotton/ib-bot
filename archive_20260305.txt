@@ -651,8 +651,8 @@ class ContractMonitor:
     def get_status(self) -> dict:
         buf = self.buffer
         current = buf.current
-        k1 = buf.completed[1] if len(buf.completed) >= 2 else None
-        k2 = buf.completed[0] if len(buf.completed) >= 2 else None
+        k1 = buf.completed[-1] if len(buf.completed) >= 2 else None
+        k2 = buf.completed[-2] if len(buf.completed) >= 2 else None
         pos = self._position
         cp = current.close if current else None
 
