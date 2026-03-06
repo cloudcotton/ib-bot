@@ -197,13 +197,13 @@ function buildCard(c) {
   const k2 = c.k2;
   const klineHTML = c.klines_ready && kn ? `
     <div class="kline-row">
-      ${klineCell('Kn 价', kn.close)} ${klineCell('Kn 低', kn.low, 'var(--red)')}
-      ${klineCell('K-1 低', k1?.low, 'var(--red)')} ${klineCell('K-2 低', k2?.low, 'var(--red)')}
-    </div>
-    <div class="kline-row">
+      ${klineCell('Kn 价', kn.close)}
       ${klineCell('Kn 高', kn.high, 'var(--green)')}
       ${klineCell('K-1 高', k1?.high, 'var(--green)')} ${klineCell('K-2 高', k2?.high, 'var(--green)')}
-      ${klineCell('成交量', kn.volume, null, 0)}
+    </div>
+    <div class="kline-row">
+      ${klineCell('成交量', kn.volume, null, 0)} ${klineCell('Kn 低', kn.low, 'var(--red)')}
+      ${klineCell('K-1 低', k1?.low, 'var(--red)')} ${klineCell('K-2 低', k2?.low, 'var(--red)')}
     </div>`
     : `<div class="not-ready-hint">⏳ K 线缓冲区预热中（${c.bars_buffered}/2 根）</div>`;
 

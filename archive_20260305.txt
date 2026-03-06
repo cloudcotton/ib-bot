@@ -1,0 +1,2870 @@
+# ============================================================
+# FILE: run.py
+# ============================================================
+"""程序入口。
+
+用法：
+    python run.py
+    python run.py --host 0.0.0.0 --port 8000
+
+Windows 注意事项：
+    ib_insync 需要 SelectorEventLoop（Windows 默认是 ProactorEventLoop），
+    且 nest_asyncio 必须补丁到 uvicorn 实际使用的同一个 loop 实例上。
+    因此不使用 uvicorn.run()（内部会新建 loop），改用 loop.run_until_complete()。
+"""
+
+import argparse
+import asyncio
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description="IB Stop-Loss Bot")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+
+    # ── Windows 事件循环修复 ──────────────────────────────────────────────
+    # 必须在 new_event_loop() 之前设置 policy，否则创建的仍是 ProactorEventLoop
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # 创建唯一的 SelectorEventLoop 并立刻用 nest_asyncio 打补丁
+    # 补丁打在这个具体实例上，之后 uvicorn 和 ib_insync 共用同一个 loop
+    import nest_asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    nest_asyncio.apply(loop)
+
+    # nest_asyncio 将 server.serve() 包成 Task-1；Ctrl-C 时该 Task 以
+    # KeyboardInterrupt 结束但异常未被取走，GC 时 asyncio 会打警告。
+    # 自定义异常处理器把 KeyboardInterrupt / SystemExit 静默掉即可。
+    def _exc_handler(lp, ctx):
+        if isinstance(ctx.get('exception'), (KeyboardInterrupt, SystemExit)):
+            return
+        lp.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_exc_handler)
+
+    # ── 启动 uvicorn（在上面已打补丁的 loop 内运行）──────────────────────
+    import uvicorn
+    config = uvicorn.Config(
+        "app.main:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+    try:
+        loop.run_until_complete(server.serve())
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+# ============================================================
+# FILE: config.yaml
+# ============================================================
+# ============================================================
+# IB Stop-Loss Bot 配置文件
+# ============================================================
+
+# ── IB 连接（亦可通过 .env 覆盖）──────────────────────────
+ib:
+  host: "127.0.0.1"
+  port: 4001          # TWS 模拟: 7497 | 实盘: 7496 | Gateway 模拟: 4002 | 实盘: 4001
+  client_id: 1
+
+# ── 监控合约列表 ──────────────────────────────────────────
+# 支持的 exchange: CME (美股指数期货), HKFE (港股指数期货)
+# 支持的 timeframe: 1m / 5m / 15m / 30m / 1h / 2h / 4h / 1d
+# expiry: "" = 自动取近月合约, "202506" = 指定到期月
+contracts:
+  - symbol: "ES"          # E-mini S&P 500
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 50        # 固定合约乘数，避免 IB 接口瞬时异常导致均价失真
+    use_rth: false        # false = 监控全时段 (适合几乎 23 小时交易的美指期货)
+    enabled: true
+
+  - symbol: "MES"         # Micro E-mini S&P 500
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 5
+    use_rth: false
+    enabled: true        # 默认关闭，按需启用
+
+  - symbol: "NQ"          # E-mini Nasdaq-100
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 20
+    use_rth: false
+    enabled: true
+
+  - symbol: "MNQ"         # Micro E-mini Nasdaq-100
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 2
+    use_rth: false
+    enabled: true
+
+  - symbol: "HSI"         # 恒生指数期货
+    exchange: "HKFE"
+    currency: "HKD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 50
+    use_rth: true         # true = 仅正常交易时段（港股期货有午休）
+    enabled: true
+
+  - symbol: "MHI"         # 小型恒生指数期货
+    exchange: "HKFE"
+    currency: "HKD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 10
+    use_rth: true
+    enabled: true
+
+# ── 账户净值定时记录 ───────────────────────────────────────
+equity_log:
+  enabled: true
+  record_time: "17:00"    # 每日记录时刻（服务器本地时间 HH:MM）
+
+# ── 止损策略参数 ──────────────────────────────────────────
+strategy:
+  # 双K止损平仓逻辑：
+  #   平多: 当前价 ≤ Kn低点 且 当前价 < min(K-1低, K-2低)
+  #   平空: 当前价 ≥ Kn高点 且 当前价 > max(K-1高, K-2高)
+  signal_enabled: true     # 双K止损开关（重启后保持此状态）
+  signal_cooldown_sec: 30  # 同合约同方向触发后的冷却时间（秒）
+
+# ── 通知 ──────────────────────────────────────────────────
+notify:
+  enabled: true
+  telegram_bot_token: "8395848682:AAFuc5cWbiLQsz9dwnzqFY0AE8aM_UH0n28"   # 也可写在 .env 中
+  telegram_chat_id: "1889396272"
+  min_interval_sec: 10
+
+
+# ============================================================
+# FILE: requirements.txt
+# ============================================================
+ib_insync==0.9.86
+nest_asyncio>=1.6.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+pydantic>=2.0.0
+httpx>=0.27.0
+tzdata>=2024.1
+
+
+# ============================================================
+# FILE: app/main.py
+# ============================================================
+"""FastAPI 应用工厂与生命周期管理。
+
+启动顺序：
+  1. 加载配置（config.yaml + .env）
+  2. 初始化日志
+  3. 启动 TradingEngine（连接 IB，订阅 K 线）
+  4. 挂载 API 路由 + 静态 Web UI
+
+访问：http://127.0.0.1:8000/
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.api import router as api_router
+from core.engine import TradingEngine
+from core.logging_setup import setup_logging
+from core.settings import get_settings
+
+logger = logging.getLogger(__name__)
+
+_WEBUI_DIR = Path(__file__).parent.parent / "webui"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── 启动 ──────────────────────────────────────────────────────────────
+    setup_logging()
+    logger.info("IB Bot 启动中…")
+
+    settings = get_settings()
+    engine = TradingEngine(settings)
+
+    try:
+        await engine.start()
+    except Exception as e:
+        logger.error(f"引擎启动失败: {e}")
+        raise
+
+    app.state.engine = engine
+    logger.info("IB Bot 就绪")
+
+    yield
+
+    # ── 关闭 ──────────────────────────────────────────────────────────────
+    logger.info("IB Bot 关闭中…")
+    await engine.stop()
+    logger.info("IB Bot 已关闭")
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="IB Bot",
+        description="Interactive Brokers 期货止损机器人",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+
+    # API 路由
+    app.include_router(api_router)
+
+    # 静态资源（CSS / JS）
+    if _WEBUI_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(_WEBUI_DIR)), name="static")
+
+    # 根路由 → Web 控制台
+    @app.get("/", include_in_schema=False)
+    async def index():
+        html = _WEBUI_DIR / "index.html"
+        if html.exists():
+            return FileResponse(str(html))
+        return {"message": "IB Bot is running"}
+
+    return app
+
+
+app = create_app()
+
+
+# ============================================================
+# FILE: app/api.py
+# ============================================================
+"""核心业务 REST API 路由。"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, HTTPException, Request
+
+from web.schemas import (
+    CancelStopRequest,
+    HealthResponse,
+    ManualCloseRequest,
+    OpenPositionRequest,
+    SetStopRequest,
+    UpdateNotifyRequest,
+    UpdateStrategyRequest,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api")
+
+
+def _engine(request: Request):
+    engine = request.app.state.engine
+    if engine is None:
+        raise HTTPException(503, "引擎未就绪")
+    return engine
+
+
+# ── 状态 ──────────────────────────────────────────────────────────────────
+
+
+@router.get("/healthz", response_model=HealthResponse)
+async def healthz(request: Request):
+    e = _engine(request)
+    return HealthResponse(connected=e.ib_client.is_connected, running=e._running)
+
+
+@router.get("/status")
+async def status(request: Request):
+    """完整运行状态快照（前端每秒轮询）。"""
+    return _engine(request).get_status()
+
+
+# ── 开仓 ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/trade/open")
+async def open_position(body: OpenPositionRequest, request: Request):
+    """开仓（市价/限价），可同时设置止损价。
+
+    止损价设置后，开仓成交时自动挂 IB 原生止损单（服务端执行）。
+    """
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+
+    if body.direction not in ("long", "short"):
+        raise HTTPException(400, "direction 必须是 'long' 或 'short'")
+    if body.order_type not in ("market", "limit"):
+        raise HTTPException(400, "order_type 必须是 'market' 或 'limit'")
+    if body.order_type == "limit" and body.limit_price is None:
+        raise HTTPException(400, "限价单必须提供 limit_price")
+    if body.qty <= 0:
+        raise HTTPException(400, "qty 必须大于 0")
+
+    result = await e.open_position(
+        key=key,
+        direction=body.direction,
+        qty=body.qty,
+        order_type=body.order_type,
+        limit_price=body.limit_price,
+        stop_price=body.stop_price,
+    )
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "开仓失败"))
+    return result
+
+
+# ── 止损管理 ──────────────────────────────────────────────────────────────
+
+
+@router.post("/trade/set_stop")
+async def set_stop(body: SetStopRequest, request: Request):
+    """为当前持仓设置或修改止损价（重新挂 IB 止损单）。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    result = await e.set_stop_loss(key, body.stop_price)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "设置止损失败"))
+    return result
+
+
+@router.post("/trade/cancel_stop")
+async def cancel_stop(body: CancelStopRequest, request: Request):
+    """撤销当前止损单（不平仓）。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    result = await e.cancel_stop_loss(key)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "撤止损失败"))
+    return result
+
+
+# ── 平仓 ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/trade/close")
+async def manual_close(body: ManualCloseRequest, request: Request):
+    """手动平仓（市价或限价），同时自动撤销止损单。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    if body.order_type not in ("market", "limit"):
+        raise HTTPException(400, "order_type 必须是 'market' 或 'limit'")
+    if body.order_type == "limit" and body.limit_price is None:
+        raise HTTPException(400, "限价平仓必须提供 limit_price")
+    result = await e.manual_close(key, body.order_type, body.limit_price)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "平仓失败"))
+    return result
+
+
+# ── 参数热更新 ──────────────────────────────────────────────────────────────
+
+
+@router.post("/params/strategy")
+async def update_strategy(body: UpdateStrategyRequest, request: Request):
+    e = _engine(request)
+    await e.update_strategy_params(
+        cooldown_sec=body.signal_cooldown_sec,
+        signal_enabled=body.signal_enabled,
+    )
+    return {"success": True, "strategy": e.settings.strategy.model_dump()}
+
+
+@router.post("/params/notify")
+async def update_notify(body: UpdateNotifyRequest, request: Request):
+    e = _engine(request)
+    nc = e.settings.notify
+    if body.enabled is not None:
+        nc.enabled = body.enabled
+    if body.telegram_bot_token is not None:
+        nc.telegram_bot_token = body.telegram_bot_token
+    if body.telegram_chat_id is not None:
+        nc.telegram_chat_id = body.telegram_chat_id
+    if body.min_interval_sec is not None:
+        nc.min_interval_sec = body.min_interval_sec
+    if e._notifier:
+        e._notifier._token = nc.telegram_bot_token
+        e._notifier._chat_id = nc.telegram_chat_id
+        e._notifier._min_interval = nc.min_interval_sec
+    return {"success": True}
+
+
+@router.post("/notify/test")
+async def test_notify(request: Request):
+    e = _engine(request)
+    if not e._notifier or not e._notifier.enabled:
+        raise HTTPException(400, "Telegram 未配置")
+    sent = e._notifier.send("🔔 IB Bot 测试通知")
+    return {"sent": sent}
+
+
+# ============================================================
+# FILE: core/engine.py
+# ============================================================
+"""交易引擎：协调合约监控、信号检测、下单执行。
+
+功能：
+  1. 止损监控   — 双K止损，自动市价平仓
+  2. 手动开仓   — 市价/限价，开仓后自动挂 IB 原生止损单
+  3. 止损管理   — 设置/修改止损价（IB 服务端止损单）
+  4. 手动平仓   — 市价平仓 + 自动撤销止损单
+
+止损双层保护：
+  - IB 原生止损单（STP）：服务端执行，Bot 断线后仍有效
+  - 双K止损逻辑：Bot 运行时作为辅助退出信号
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime
+from typing import Optional
+
+from adapters.ib_client import IBClient
+from core.equity_recorder import EquityRecorder
+from core.kline_manager import Bar, KlineBuffer
+from core.notifier import TelegramNotifier
+from core.settings import ContractConfig, Settings, save_settings
+from core.strategy import Signal, check_signal
+
+logger = logging.getLogger(__name__)
+
+_RECONNECT_DELAYS = [5, 10, 30, 60, 120, 300]
+
+
+def _safe_ensure_future(coro, label: str = "") -> asyncio.Task:
+    """asyncio.ensure_future 的安全包装：后台协程若抛出未捕获异常，
+    通过 done_callback 记录完整 traceback，防止异常被静默吞没。"""
+    task = asyncio.ensure_future(coro)
+
+    def _on_done(t: asyncio.Task) -> None:
+        if not t.cancelled() and (exc := t.exception()):
+            logger.error(f"后台任务异常 [{label}]", exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+# ── ContractMonitor ────────────────────────────────────────────────────────
+
+
+class ContractMonitor:
+    """监控单个合约：K 线缓冲 + 持仓状态 + 止损单追踪。"""
+
+    def __init__(
+        self,
+        cfg: ContractConfig,
+        ib_contract,
+        ib_client: IBClient,
+        notifier: Optional[TelegramNotifier],
+        cooldown_sec: int,
+    ) -> None:
+        self.cfg = cfg
+        self.contract = ib_contract
+        self._ib = ib_client
+        self._notifier = notifier
+        self._cooldown = cooldown_sec
+
+        self.buffer = KlineBuffer()
+        self.bars = None
+        self._initialized: bool = False     # 历史K线是否已预热
+        self._signal_enabled: bool = True   # 双K止损信号开关
+
+        # 持仓状态
+        self._position: float = 0.0
+        self._entry_price: Optional[float] = None    # 开仓均价（来自 IB avgCost）
+
+        # IB 止损单追踪
+        self._stop_trade = None                       # ib_insync Trade 对象
+        self._stop_price: Optional[float] = None      # 当前止损价
+
+        # 平仓执行状态
+        self._in_flight: bool = False
+        self._close_lock = asyncio.Lock()        # 防止异步重入
+        self._last_signal_time: dict[str, datetime] = {}
+        self._last_signal: Optional[str] = None
+
+    # ── 持仓更新（IBClient 回调）──────────────────────────────────────────
+
+    def update_position(self, qty: float, avg_cost: float = 0.0) -> None:
+        old = self._position
+        self._position = qty
+        if qty != 0 and avg_cost:
+            # IB 期货的 avgCost = 成交价 × 合约乘数，需除以乘数还原为价格
+            # 乘数取自静态配置，避免 IB 接口瞬时返回异常导致均价失真
+            mult = self.cfg.multiplier or 1.0
+            self._entry_price = avg_cost / mult
+        elif qty == 0:
+            self._entry_price = None
+            self._stop_price = None
+            if self._stop_trade is not None:
+                # 持仓归零（IB 强平或保证金不足触发），主动撤销残留止损单。
+                # 若止损单尚未触发，孤立订单可能在后续行情中意外反向开仓。
+                # _cancel_stop_order 异步执行，由它负责将 _stop_trade 置 None。
+                _safe_ensure_future(self._cancel_stop_order(),
+                                    label=f"{self.cfg.key} 强平后撤止损")
+            else:
+                self._stop_trade = None
+        if old != qty:
+            logger.info(f"[{self.cfg.key}] 持仓: {old} → {qty}  均价={avg_cost:.4f}")
+
+    # ── K 线更新回调 ───────────────────────────────────────────────────────
+
+    def on_bars_update(self, bars, has_new_bar: bool) -> None:
+        if not bars:
+            return
+        try:
+            if not self._initialized:
+                # 首次回调：bars 包含完整历史数据
+                # bars[-1] = 当前未完成K线，bars[:-1] = 已完成K线列表
+                self._initialized = True
+                completed = list(bars[:-1])
+                for b in completed[-24:]:   # 取最多24根预热（EMA20 需要 20 根种子）
+                    self.buffer.add_completed(Bar(
+                        time=str(b.date), open=float(b.open), high=float(b.high),
+                        low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+                    ))
+                b = bars[-1]
+                self.buffer.update_current(Bar(
+                    time=str(b.date), open=float(b.open), high=float(b.high),
+                    low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+                ))
+                logger.info(
+                    f"[{self.cfg.key}] K线缓冲区预热完成"
+                    f"（历史 {len(self.buffer.completed)} 根，ready={self.buffer.ready}"
+                    f"，ema20={self.buffer.ema20}）"
+                )
+            else:
+                if has_new_bar and len(bars) >= 2:
+                    b = bars[-2]
+                    self.buffer.add_completed(Bar(
+                        time=str(b.date), open=float(b.open), high=float(b.high),
+                        low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+                    ))
+                b = bars[-1]
+                self.buffer.update_current(Bar(
+                    time=str(b.date), open=float(b.open), high=float(b.high),
+                    low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+                ))
+        except Exception as e:
+            logger.error(f"[{self.cfg.key}] K 线更新异常: {e}")
+            return
+        self._check_and_fire()
+
+    def _check_and_fire(self) -> None:
+        """双K止损检测（辅助退出信号）。"""
+        if not self._signal_enabled:
+            return
+        signal = check_signal(self.buffer, self._position)
+        if signal is None:
+            return
+        now = datetime.now()
+        last = self._last_signal_time.get(signal.value)
+        if last and (now - last).total_seconds() < self._cooldown:
+            return
+        if self._in_flight:
+            return
+        # 在同步段立即置位，防止后续 Tick 回调在 _execute_close 启动前再次进入
+        self._in_flight = True
+        self._last_signal_time[signal.value] = now
+        self._last_signal = signal.value
+        logger.info(f"[{self.cfg.key}] 双K止损信号: {signal.value} 持仓={self._position}")
+        _safe_ensure_future(self._execute_close(signal, reason="双K止损"),
+                            label=f"{self.cfg.key} _execute_close")
+
+    async def _execute_close(self, signal: Signal, reason: str = "") -> None:
+        # Lock 确保即使多个协程同时被调度，平仓逻辑也绝对串行执行
+        if self._close_lock.locked():
+            logger.debug(f"[{self.cfg.key}] 平仓已在进行中，丢弃重复信号")
+            self._in_flight = False
+            return
+        async with self._close_lock:
+            pos_qty = self._position
+            try:
+                # 先撤销 IB 止损单（避免重复平仓）
+                await self._cancel_stop_order()
+
+                success = await self._ib.close_position(self.contract, pos_qty)
+                if success and self._notifier:
+                    price = self.buffer.current.close if self.buffer.current else 0.0
+                    self._notifier.notify_close(
+                        symbol=self.cfg.symbol,
+                        exchange=self.cfg.exchange,
+                        direction=signal.value,
+                        qty=abs(pos_qty),
+                        price=price,
+                    )
+            except Exception as e:
+                logger.error(f"[{self.cfg.key}] 执行平仓异常: {e}")
+            finally:
+                self._in_flight = False
+
+    # ── 止损单操作 ────────────────────────────────────────────────────────
+
+    async def _cancel_stop_order(self) -> None:
+        if self._stop_trade is not None:
+            try:
+                self._ib.cancel_order(self._stop_trade)
+            except Exception as e:
+                logger.warning(f"[{self.cfg.key}] 撤止损单异常: {e}")
+            self._stop_trade = None
+            self._stop_price = None
+
+    # ── 状态快照 ───────────────────────────────────────────────────────────
+
+    def get_status(self) -> dict:
+        buf = self.buffer
+        current = buf.current
+        k1 = buf.completed[1] if len(buf.completed) >= 2 else None
+        k2 = buf.completed[0] if len(buf.completed) >= 2 else None
+        pos = self._position
+        cp = current.close if current else None
+
+        # 浮动盈亏（点数）
+        pnl_pts: Optional[float] = None
+        if pos != 0 and cp and self._entry_price:
+            pnl_pts = (cp - self._entry_price) * (1 if pos > 0 else -1) * abs(pos)
+
+        return {
+            "symbol": self.cfg.symbol,
+            "exchange": self.cfg.exchange,
+            "currency": self.cfg.currency,
+            "timeframe": self.cfg.timeframe,
+            "expiry": self.contract.lastTradeDateOrContractMonth,
+            "position": pos,
+            "position_side": "long" if pos > 0 else ("short" if pos < 0 else "flat"),
+            "entry_price": self._entry_price,
+            "current_price": cp,
+            "pnl_pts": round(pnl_pts, 4) if pnl_pts is not None else None,
+            "stop_price": self._stop_price,
+            "klines_ready": buf.ready,
+            "in_flight": self._in_flight,
+            "last_signal": self._last_signal,
+            "last_signal_time": (
+                self._last_signal_time[self._last_signal].isoformat()
+                if self._last_signal and self._last_signal in self._last_signal_time
+                else None
+            ),
+            "ema20": round(buf.ema20, 4) if buf.ema20 is not None else None,
+            "current_bar": current.to_dict() if current else None,
+            "k1": k1.to_dict() if k1 else None,
+            "k2": k2.to_dict() if k2 else None,
+            "bars_buffered": len(buf.completed),
+        }
+
+
+# ── TradingEngine ──────────────────────────────────────────────────────────
+
+
+class TradingEngine:
+    """顶层引擎：管理 IB 连接、合约监控、开仓/止损操作。"""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.ib_client = IBClient(
+            host=settings.ib.host,
+            port=settings.ib.port,
+            client_id=settings.ib.client_id,
+            account=settings.ib_account,
+        )
+        self._monitors: dict[str, ContractMonitor] = {}
+        self._notifier: Optional[TelegramNotifier] = None
+        self._equity_recorder: Optional[EquityRecorder] = None
+        self._running = False
+        self._stopping = False
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._reconnect_attempt = 0
+        self._resubscribe_task: Optional[asyncio.Task] = None  # 10182 触发的定向重订阅
+
+    # ── 生命周期 ───────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        logger.info("引擎启动中…")
+        nc = self.settings.notify
+        if nc.enabled:
+            from core.notifier import init_notifier
+            self._notifier = init_notifier(
+                nc.telegram_bot_token, nc.telegram_chat_id, nc.min_interval_sec
+            )
+
+        await self.ib_client.connect()
+        if self._notifier:
+            self._notifier.notify_connected(self.settings.ib.host, self.settings.ib.port)
+
+        self.ib_client.register_position_callback(self._on_position_update)
+        self.ib_client.ib.disconnectedEvent += self._on_disconnected
+        self.ib_client.ib.errorEvent       += self._on_ib_error
+
+        for cfg in self.settings.active_contracts:
+            await self._init_monitor(cfg)
+
+        # 启动净值定时记录器
+        elc = self.settings.equity_log
+        if elc.enabled:
+            self._equity_recorder = EquityRecorder(self.ib_client, elc.record_time)
+            self._equity_recorder.start()
+
+        self._running = True
+        logger.info(f"引擎就绪，监控 {len(self._monitors)} 个合约")
+
+    async def stop(self) -> None:
+        logger.info("引擎停止中…")
+        self._stopping = True
+        self._running = False
+        if self._equity_recorder:
+            self._equity_recorder.stop()
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+        for monitor in self._monitors.values():
+            if monitor.bars is not None:
+                try:
+                    self.ib_client.cancel_bars(monitor.bars)
+                except Exception:
+                    pass
+        await self.ib_client.disconnect()
+        logger.info("引擎已停止")
+
+    # ── 合约初始化 ─────────────────────────────────────────────────────────
+
+    async def _init_monitor(self, cfg: ContractConfig) -> None:
+        logger.info(f"初始化合约监控: {cfg.key}")
+        try:
+            ib_contract = await self.ib_client.resolve_contract(
+                symbol=cfg.symbol, exchange=cfg.exchange,
+                currency=cfg.currency, expiry=cfg.expiry,
+            )
+        except Exception as e:
+            logger.error(f"合约解析失败 {cfg.key}: {e}")
+            return
+
+        monitor = ContractMonitor(
+            cfg=cfg, ib_contract=ib_contract, ib_client=self.ib_client,
+            notifier=self._notifier,
+            cooldown_sec=self.settings.strategy.signal_cooldown_sec,
+        )
+        qty = self.ib_client.get_position(ib_contract.conId)
+        avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
+        monitor.update_position(qty, avg_cost)
+
+        bars = await self.ib_client.subscribe_bars(
+            contract=ib_contract, timeframe=cfg.timeframe,
+            use_rth=cfg.use_rth, callback=monitor.on_bars_update,
+        )
+        monitor.bars = bars
+        self._monitors[cfg.key] = monitor
+        logger.info(f"合约监控已启动: {cfg.key} conId={ib_contract.conId}")
+
+    # ── 开仓 ───────────────────────────────────────────────────────────────
+
+    async def open_position(
+        self,
+        key: str,
+        direction: str,
+        qty: float,
+        order_type: str,
+        limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+    ) -> dict:
+        """开仓，可同时设置止损价（开仓成交后自动挂 IB 止损单）。"""
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if monitor._position != 0:
+            return {"success": False, "error": "已有持仓，请先平仓"}
+        if not self.ib_client.is_connected:
+            return {"success": False, "error": "IB 未连接"}
+
+        try:
+            trade = self.ib_client.open_position(
+                contract=monitor.contract,
+                direction=direction,
+                qty=qty,
+                order_type=order_type,
+                limit_price=limit_price,
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+        # 成交后挂止损单
+        if stop_price is not None:
+            _stop_price = stop_price
+            _direction = direction
+            _qty = qty
+
+            def on_entry_filled(t):
+                fill = t.orderStatus.avgFillPrice
+                logger.info(f"[{key}] 开仓成交: {_direction} {_qty} @ {fill}")
+                _safe_ensure_future(
+                    self._submit_stop(monitor, _direction, _qty, _stop_price),
+                    label=f"{key} _submit_stop",
+                )
+
+            trade.filledEvent += on_entry_filled
+
+        return {
+            "success": True,
+            "order_id": trade.order.orderId,
+            "order_type": order_type,
+            "direction": direction,
+            "qty": qty,
+            "stop_price": stop_price,
+        }
+
+    async def _submit_stop(
+        self, monitor: ContractMonitor,
+        direction: str, qty: float, stop_price: float,
+    ) -> None:
+        """开仓成交后提交 IB 止损单，并监听止损成交事件。"""
+        try:
+            # 若已有旧止损单先撤掉
+            await monitor._cancel_stop_order()
+
+            stop_trade = self.ib_client.place_stop_order(
+                contract=monitor.contract,
+                position_direction=direction,
+                qty=qty,
+                stop_price=stop_price,
+            )
+            monitor._stop_trade = stop_trade
+            monitor._stop_price = stop_price
+            logger.info(f"[{monitor.cfg.key}] IB 止损单已提交 @ {stop_price}")
+
+            # 止损单成交时通知
+            def on_stop_filled(t):
+                fill = t.orderStatus.avgFillPrice
+                logger.info(f"[{monitor.cfg.key}] IB 止损单触发 @ {fill}")
+                monitor._stop_trade = None
+                monitor._stop_price = None
+                if self._notifier:
+                    self._notifier.send(
+                        f"🛑 <b>止损触发（IB 执行）</b>\n"
+                        f"合约: <code>{monitor.cfg.symbol}@{monitor.cfg.exchange}</code>\n"
+                        f"成交价: {fill}"
+                    )
+
+            stop_trade.filledEvent += on_stop_filled
+
+        except Exception as e:
+            logger.error(f"[{monitor.cfg.key}] 提交止损单失败: {e}")
+
+    # ── 止损价管理 ─────────────────────────────────────────────────────────
+
+    async def set_stop_loss(self, key: str, stop_price: float) -> dict:
+        """为当前持仓设置或修改止损价（重新挂 IB 止损单）。"""
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if monitor._position == 0:
+            return {"success": False, "error": "当前无持仓"}
+
+        direction = "long" if monitor._position > 0 else "short"
+        qty = abs(monitor._position)
+
+        await self._submit_stop(monitor, direction, qty, stop_price)
+        return {"success": True, "stop_price": stop_price}
+
+    async def cancel_stop_loss(self, key: str) -> dict:
+        """撤销当前止损单。"""
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        await monitor._cancel_stop_order()
+        return {"success": True}
+
+    # ── 手动平仓 ───────────────────────────────────────────────────────────
+
+    async def manual_close(
+        self, key: str,
+        order_type: str = "market",
+        limit_price: Optional[float] = None,
+    ) -> dict:
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if monitor._position == 0:
+            return {"success": False, "error": "当前无持仓"}
+
+        # 先撤止损单，再平仓
+        await monitor._cancel_stop_order()
+        success = await self.ib_client.close_position(
+            monitor.contract, monitor._position, order_type, limit_price
+        )
+        return {"success": success}
+
+    # ── 断线重连 ───────────────────────────────────────────────────────────
+
+    def _on_disconnected(self) -> None:
+        if self._stopping:
+            return
+        logger.warning("IB 连接断开，准备自动重连…")
+        self._running = False
+        if self._notifier:
+            self._notifier.notify_disconnected()
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = _safe_ensure_future(
+                self._reconnect_loop(), label="_reconnect_loop"
+            )
+
+    def _on_ib_error(self, reqId: int, errorCode: int, errorString: str, contract) -> None:
+        """监听 IB 错误码，对关键错误做自动恢复。
+
+        10182 — Failed to request live updates (disconnected)：
+            数据农场断开重连后，keepUpToDate K线推送流被服务端强制掐断。
+            引擎仍在线（_running=True），但所有合约实质上已"失聪"。
+            解决：立即触发 _resubscribe_all 重新拉取 K 线历史 + 恢复推送。
+            去重：用 _resubscribe_task 确保多个 10182 只触发一次重订阅。
+        """
+        if errorCode == 10182 and self._running and not self._stopping:
+            if self._resubscribe_task is None or self._resubscribe_task.done():
+                logger.warning(
+                    f"K线推送流断开 (10182 reqId={reqId})，自动重新订阅所有合约…"
+                )
+                self._resubscribe_task = _safe_ensure_future(
+                    self._resubscribe_all(), label="_resubscribe_all(10182)"
+                )
+
+    async def _reconnect_loop(self) -> None:
+        self._reconnect_attempt = 0
+        while not self._stopping:
+            delay = _RECONNECT_DELAYS[min(self._reconnect_attempt, len(_RECONNECT_DELAYS) - 1)]
+            logger.info(f"等待 {delay}s 后发起第 {self._reconnect_attempt + 1} 次重连…")
+            await asyncio.sleep(delay)
+            if self._stopping:
+                break
+            try:
+                await self.ib_client.connect()
+            except Exception as e:
+                logger.warning(f"第 {self._reconnect_attempt + 1} 次重连失败: {e}")
+                self._reconnect_attempt += 1
+                continue
+            try:
+                await self._resubscribe_all()
+            except Exception as e:
+                logger.error(f"重新订阅失败: {e}")
+                self._reconnect_attempt += 1
+                continue
+            self._running = True
+            logger.info(f"重连成功（共尝试 {self._reconnect_attempt + 1} 次）")
+            if self._notifier:
+                self._notifier.notify_connected(self.settings.ib.host, self.settings.ib.port)
+            break
+
+    async def _resubscribe_all(self) -> None:
+        await self.ib_client._fetch_initial_positions()
+        for key, monitor in self._monitors.items():
+            if monitor.bars is not None:
+                try:
+                    self.ib_client.cancel_bars(monitor.bars)
+                except Exception:
+                    pass
+                monitor.bars = None
+            monitor.buffer.reset()
+            monitor._initialized = False
+            try:
+                bars = await self.ib_client.subscribe_bars(
+                    contract=monitor.contract, timeframe=monitor.cfg.timeframe,
+                    use_rth=monitor.cfg.use_rth, callback=monitor.on_bars_update,
+                )
+                monitor.bars = bars
+                qty = self.ib_client.get_position(monitor.contract.conId)
+                avg_cost = self.ib_client.get_avg_cost(monitor.contract.conId)
+                monitor.update_position(qty, avg_cost)
+                logger.info(f"重新订阅成功: {key}")
+            except Exception as e:
+                logger.error(f"重新订阅失败 {key}: {e}")
+
+    # ── 持仓变动回调 ───────────────────────────────────────────────────────
+
+    def _on_position_update(self, con_id: int, qty: float, avg_cost: float) -> None:
+        for monitor in self._monitors.values():
+            if monitor.contract.conId == con_id:
+                monitor.update_position(qty, avg_cost)
+                break
+
+    # ── 状态快照 ───────────────────────────────────────────────────────────
+
+    def get_status(self) -> dict:
+        reconnecting = (
+            self._reconnect_task is not None and not self._reconnect_task.done()
+        )
+        return {
+            "connected": self.ib_client.is_connected,
+            "running": self._running,
+            "reconnecting": reconnecting,
+            "reconnect_attempt": self._reconnect_attempt if reconnecting else 0,
+            "signal_enabled": self.settings.strategy.signal_enabled,
+            "account": self.ib_client.get_account_summary(),
+            "contracts": [m.get_status() for m in self._monitors.values()],
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    # ── 参数热更新 ─────────────────────────────────────────────────────────
+
+    async def update_strategy_params(
+        self,
+        cooldown_sec: Optional[int] = None,
+        signal_enabled: Optional[bool] = None,
+    ) -> None:
+        if cooldown_sec is not None:
+            self.settings.strategy.signal_cooldown_sec = cooldown_sec
+            for m in self._monitors.values():
+                m._cooldown = cooldown_sec
+        if signal_enabled is not None:
+            self.settings.strategy.signal_enabled = signal_enabled
+            for m in self._monitors.values():
+                m._signal_enabled = signal_enabled
+            save_settings(self.settings)
+            logger.info(f"双K止损已{'启用' if signal_enabled else '暂停'}")
+
+
+# ============================================================
+# FILE: core/strategy.py
+# ============================================================
+"""止损信号检测（纯函数，无副作用）。
+
+策略：双K止损平仓
+  平多信号: 当前价 ≤ Kn 运行低点 且 当前价 < min(K-1.low, K-2.low)
+  平空信号: 当前价 ≥ Kn 运行高点 且 当前价 > max(K-1.high, K-2.high)
+
+条件一 (price <= Kn.low)：
+    IB 推送的当前 bar 中，close = 最新成交价，low = 运行低点。
+    close <= low 等价于 close == low，即当前价刚刚创下本 K 线新低。
+条件二 (price < min(K-1.low, K-2.low))：
+    确保新低真正有效突破了前两根 K 线（K-1、K-2）的支撑区域。
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Optional
+
+from .kline_manager import KlineBuffer
+
+
+class Signal(str, Enum):
+    CLOSE_LONG = "CLOSE_LONG"
+    CLOSE_SHORT = "CLOSE_SHORT"
+
+
+def check_signal(buffer: KlineBuffer, position: float) -> Optional[Signal]:
+    """基于当前缓冲区和持仓方向，返回止损信号或 None。
+
+    Args:
+        buffer:   合约的 K 线缓冲区
+        position: 持仓数量（>0 多头，<0 空头，0 平仓）
+
+    Returns:
+        Signal.CLOSE_LONG / CLOSE_SHORT，或 None
+    """
+    if position == 0:
+        return None
+
+    data = buffer.get_signal_data()
+    if data is None:
+        return None
+
+    kn, k1, k2 = data
+    price = kn.close  # 当前价 = 进行中 K 线的最新收盘价
+
+    if position > 0:  # 多头 → 监控平多信号
+        if price <= kn.low and price < min(k1.low, k2.low):
+            return Signal.CLOSE_LONG
+
+    elif position < 0:  # 空头 → 监控平空信号
+        if price >= kn.high and price > max(k1.high, k2.high):
+            return Signal.CLOSE_SHORT
+
+    return None
+
+
+# ============================================================
+# FILE: core/kline_manager.py
+# ============================================================
+"""K 线缓冲区管理。
+
+KlineBuffer  — 单个合约的 K 线缓冲：最多 25 根已完成 + 1 根进行中 + EMA20
+KlineManager — 所有合约缓冲的字典管理器
+
+completed deque(maxlen=25):
+    [0]  = 最早保留的已完成 K 线
+    [-2] = K-2（倒数第 2 根已完成）
+    [-1] = K-1（最新已完成）
+current = Kn（正在成形，每 tick 更新）
+
+EMA20（20 周期指数移动平均）：
+  - 前 20 根 K 线用 SMA 作为种子值
+  - 后续每根已完成 K 线按标准 EMA 公式递推：
+      EMA_t = close_t × k + EMA_{t-1} × (1 - k)，k = 2 / (20 + 1)
+  - 未满 20 根时 ema20 为 None（不可用）
+
+信号触发条件（双K止损）：
+  平多: current.close ≤ current.low  AND  current.close < min(K-1.low, K-2.low)
+  平空: current.close ≥ current.high AND  current.close > max(K-1.high, K-2.high)
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass
+from typing import Optional
+
+_EMA_PERIOD = 20
+_EMA_K = 2.0 / (_EMA_PERIOD + 1)   # EMA 平滑系数 ≈ 0.0952
+
+
+@dataclass
+class Bar:
+    time: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+    def to_dict(self) -> dict:
+        return {
+            "time": self.time,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+        }
+
+
+class KlineBuffer:
+    """维护单个 (合约, 周期) 的 K 线滚动缓冲，含 EMA20 实时计算。"""
+
+    def __init__(self) -> None:
+        self.completed: deque[Bar] = deque(maxlen=25)  # 保留最近 25 根（EMA20 需 20 根种子）
+        self.current: Optional[Bar] = None
+        self.ema20: Optional[float] = None             # 20 周期 EMA，不足 20 根时为 None
+
+    # ── 写入接口 ───────────────────────────────────────────────────────────
+
+    def add_completed(self, bar: Bar) -> None:
+        """追加一根已完成的 K 线，并递推更新 EMA20。"""
+        self.completed.append(bar)
+        self._update_ema(bar.close)
+
+    def _update_ema(self, close: float) -> None:
+        """EMA20 递推计算：
+        - 前 20 根满员时以 SMA 作为初始种子
+        - 之后每根按 EMA_t = close × k + EMA_{t-1} × (1-k) 递推
+        """
+        if self.ema20 is None:
+            if len(self.completed) >= _EMA_PERIOD:
+                # 用最新 20 根收盘价的简单均值初始化 EMA
+                seed_closes = [b.close for b in list(self.completed)[-_EMA_PERIOD:]]
+                self.ema20 = sum(seed_closes) / _EMA_PERIOD
+        else:
+            self.ema20 = close * _EMA_K + self.ema20 * (1 - _EMA_K)
+
+    def update_current(self, bar: Bar) -> None:
+        """更新正在成形的 K 线（每个 tick）。"""
+        self.current = bar
+
+    def reset(self) -> None:
+        """断线重连后清空缓冲，重新填充。"""
+        self.completed.clear()
+        self.current = None
+        self.ema20 = None
+
+    # ── 读取接口 ───────────────────────────────────────────────────────────
+
+    @property
+    def ready(self) -> bool:
+        """缓冲区就绪：至少 2 根已完成 K 线 + 1 根进行中。"""
+        return len(self.completed) >= 2 and self.current is not None
+
+    def get_signal_data(self) -> Optional[tuple[Bar, Bar, Bar]]:
+        """返回 (Kn, K-1, K-2)，未就绪时返回 None。"""
+        if not self.ready:
+            return None
+        k2, k1 = self.completed[-2], self.completed[-1]
+        return self.current, k1, k2
+
+
+class KlineManager:
+    """所有合约 KlineBuffer 的集中管理器。"""
+
+    def __init__(self) -> None:
+        self._buffers: dict[str, KlineBuffer] = {}
+
+    def get_or_create(self, key: str) -> KlineBuffer:
+        if key not in self._buffers:
+            self._buffers[key] = KlineBuffer()
+        return self._buffers[key]
+
+    def get(self, key: str) -> Optional[KlineBuffer]:
+        return self._buffers.get(key)
+
+    def reset(self, key: str) -> None:
+        buf = self._buffers.get(key)
+        if buf:
+            buf.reset()
+
+
+# ============================================================
+# FILE: core/notifier.py
+# ============================================================
+"""Telegram 通知模块。
+
+未配置 token / chat_id 时静默跳过，不影响主流程。
+min_interval_sec 限制最小发送间隔，防止消息风暴。
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramNotifier:
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        min_interval_sec: int = 10,
+    ) -> None:
+        self._token = bot_token.strip()
+        self._chat_id = chat_id.strip()
+        self._min_interval = min_interval_sec
+        self._last_sent: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._token and self._chat_id)
+
+    def send(self, text: str) -> bool:
+        """发送 Telegram 消息。返回是否成功发送（False = 未配置或被限流）。"""
+        if not self.enabled:
+            return False
+
+        now = time.time()
+        if now - self._last_sent < self._min_interval:
+            logger.debug("Telegram 消息被限流，跳过")
+            return False
+
+        url = f"https://api.telegram.org/bot{self._token}/sendMessage"
+        try:
+            resp = httpx.post(
+                url,
+                json={"chat_id": self._chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            self._last_sent = now
+            return True
+        except Exception as e:
+            logger.warning(f"Telegram 发送失败: {e}")
+            return False
+
+    # ── 预定义消息模板 ──────────────────────────────────────────────────────
+
+    def notify_close(
+        self,
+        symbol: str,
+        exchange: str,
+        direction: str,
+        qty: float,
+        price: float,
+    ) -> None:
+        emoji = "🔴" if direction == "CLOSE_LONG" else "🟢"
+        action = "平多" if direction == "CLOSE_LONG" else "平空"
+        text = (
+            f"{emoji} <b>止损平仓</b>\n"
+            f"合约: <code>{symbol}@{exchange}</code>\n"
+            f"方向: {action}\n"
+            f"数量: {qty}\n"
+            f"触发价: {price}"
+        )
+        self.send(text)
+
+    def notify_connected(self, host: str, port: int) -> None:
+        self.send(f"✅ IB 连接成功 <code>{host}:{port}</code>")
+
+    def notify_disconnected(self) -> None:
+        self.send("⚠️ IB 连接断开，正在重连…")
+
+    def notify_error(self, msg: str) -> None:
+        self.send(f"❌ 错误: {msg}")
+
+
+# ── 全局单例（由 engine 初始化后赋值）──────────────────────────────────────
+_notifier: Optional[TelegramNotifier] = None
+
+
+def get_notifier() -> Optional[TelegramNotifier]:
+    return _notifier
+
+
+def init_notifier(token: str, chat_id: str, min_interval: int) -> TelegramNotifier:
+    global _notifier
+    _notifier = TelegramNotifier(token, chat_id, min_interval)
+    return _notifier
+
+
+# ============================================================
+# FILE: core/settings.py
+# ============================================================
+"""配置加载与持久化。
+
+运行时所有模块通过 get_settings() 获取唯一的 Settings 单例。
+支持通过 update() 热更新部分字段（写回 config.yaml）。
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Optional
+
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel, field_validator
+
+load_dotenv()
+
+_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+
+# ── Pydantic 模型 ──────────────────────────────────────────────────────────
+
+
+class IBConfig(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = 7497
+    client_id: int = 1
+
+
+class ContractConfig(BaseModel):
+    symbol: str
+    exchange: str
+    currency: str
+    timeframe: str = "5m"
+    expiry: str = ""          # "" = 自动取近月合约
+    multiplier: float = 1.0   # 合约乘数（静态配置，优先于 IB 动态返回）
+    use_rth: bool = False
+    enabled: bool = True
+
+    @field_validator("timeframe")
+    @classmethod
+    def _validate_tf(cls, v: str) -> str:
+        valid = {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}
+        if v not in valid:
+            raise ValueError(f"timeframe 必须是 {valid} 之一，当前值: {v!r}")
+        return v
+
+    @property
+    def key(self) -> str:
+        return f"{self.symbol}@{self.exchange}"
+
+
+class StrategyConfig(BaseModel):
+    signal_enabled: bool = True      # 双K止损信号总开关
+    signal_cooldown_sec: int = 30
+
+
+class NotifyConfig(BaseModel):
+    enabled: bool = True
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    min_interval_sec: int = 10
+
+
+class EquityLogConfig(BaseModel):
+    enabled: bool = True
+    record_time: str = "17:00"    # 每日记录时刻，"HH:MM"，与服务器本地时区一致
+
+
+class Settings(BaseModel):
+    ib: IBConfig = IBConfig()
+    contracts: list[ContractConfig] = []
+    strategy: StrategyConfig = StrategyConfig()
+    notify: NotifyConfig = NotifyConfig()
+    equity_log: EquityLogConfig = EquityLogConfig()
+
+    # 账户（从 .env 读取）
+    ib_account: str = ""
+
+    @property
+    def active_contracts(self) -> list[ContractConfig]:
+        return [c for c in self.contracts if c.enabled]
+
+
+# ── 加载 ──────────────────────────────────────────────────────────────────
+
+def _load_raw() -> dict:
+    if not _CONFIG_PATH.exists():
+        return {}
+    with open(_CONFIG_PATH, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_settings() -> Settings:
+    raw = _load_raw()
+
+    # 环境变量覆盖 IB 连接参数
+    ib_section = raw.get("ib", {})
+    if os.getenv("IB_HOST"):
+        ib_section["host"] = os.environ["IB_HOST"]
+    if os.getenv("IB_PORT"):
+        ib_section["port"] = int(os.environ["IB_PORT"])
+    if os.getenv("IB_CLIENT_ID"):
+        ib_section["client_id"] = int(os.environ["IB_CLIENT_ID"])
+    raw["ib"] = ib_section
+
+    # 环境变量覆盖通知参数
+    notify_section = raw.get("notify", {})
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        notify_section["telegram_bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+    if os.getenv("TELEGRAM_CHAT_ID"):
+        notify_section["telegram_chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
+    raw["notify"] = notify_section
+
+    settings = Settings(**raw)
+    settings.ib_account = os.getenv("IB_ACCOUNT", "")
+    return settings
+
+
+def save_settings(settings: Settings) -> None:
+    """将当前 settings 写回 config.yaml（保留注释格式存在局限，直接覆盖）。"""
+    raw = _load_raw()
+    raw["ib"] = settings.ib.model_dump()
+    raw["strategy"] = settings.strategy.model_dump()
+    raw["notify"] = {
+        k: v for k, v in settings.notify.model_dump().items()
+        if k not in ("telegram_bot_token", "telegram_chat_id")  # 敏感项不写文件
+    }
+    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(raw, f, allow_unicode=True, sort_keys=False)
+
+
+# ── 单例 ──────────────────────────────────────────────────────────────────
+
+_settings: Optional[Settings] = None
+
+
+def get_settings() -> Settings:
+    global _settings
+    if _settings is None:
+        _settings = load_settings()
+    return _settings
+
+
+# ============================================================
+# FILE: core/logging_setup.py
+# ============================================================
+"""日志初始化：控制台 + 按天轮转文件，统一 UTC+8 时间戳。"""
+
+import logging
+import logging.handlers
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_HKT = ZoneInfo("Asia/Hong_Kong")
+
+
+class _HKTFormatter(logging.Formatter):
+    """在日志记录中使用 UTC+8 时间。"""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=_HKT)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat(timespec="seconds")
+
+
+def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> None:
+    Path(log_dir).mkdir(exist_ok=True)
+
+    fmt = _HKTFormatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+
+    # 控制台
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    root.addHandler(ch)
+
+    # 按天轮转文件
+    fh = logging.handlers.TimedRotatingFileHandler(
+        filename=f"{log_dir}/ib-bot.log",
+        when="midnight",
+        backupCount=30,
+        encoding="utf-8",
+    )
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+
+    # 静默 ib_insync 的 DEBUG 噪音
+    logging.getLogger("ib_insync").setLevel(logging.WARNING)
+
+    # 过滤 /api/status 每秒轮询产生的 access 日志
+    class _StatusFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "GET /api/status" not in record.getMessage()
+
+    logging.getLogger("uvicorn.access").addFilter(_StatusFilter())
+
+
+# ============================================================
+# FILE: adapters/ib_client.py
+# ============================================================
+"""IB API 适配器（基于 ib_insync）。
+
+职责：
+  - 连接 / 断开 TWS / IB Gateway
+  - 合约自动寻找近月（reqContractDetails）
+  - 订阅历史 K 线 + 实时更新（keepUpToDate=True）
+  - 查询 / 订阅持仓变动（含均价）
+  - 开仓（市价 / 限价）、止损单、撤单、平仓
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime
+from typing import Callable, Optional
+
+from ib_insync import (
+    IB, BarDataList, Future, LimitOrder, MarketOrder,
+    Position, StopOrder, util,
+)
+
+logger = logging.getLogger(__name__)
+
+# ── IB barSizeSetting 映射 ────────────────────────────────────────────────
+
+_BAR_SIZE: dict[str, str] = {
+    "1m":  "1 min",
+    "5m":  "5 mins",
+    "15m": "15 mins",
+    "30m": "30 mins",
+    "1h":  "1 hour",
+    "2h":  "2 hours",
+    "4h":  "4 hours",
+    "1d":  "1 day",
+}
+
+_DURATION: dict[str, str] = {
+    "1m":  "1 D",
+    "5m":  "2 D",
+    "15m": "3 D",
+    "30m": "5 D",
+    "1h":  "5 D",
+    "2h":  "10 D",
+    "4h":  "20 D",
+    "1d":  "1 M",
+}
+
+
+class IBClient:
+    """轻量级 ib_insync 封装，供 TradingEngine 使用。"""
+
+    def __init__(self, host: str, port: int, client_id: int, account: str = "") -> None:
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._account = account
+        self.ib = IB()
+        self._connected = False
+
+        # 持仓缓存: conId -> (quantity, avg_cost)
+        self._positions: dict[int, float] = {}
+        self._avg_costs: dict[int, float] = {}
+
+        # 持仓变动回调: (conId, qty, avg_cost)
+        self._position_callbacks: list[Callable[[int, float, float], None]] = []
+
+        # 账户数值缓存: "TAG/CURRENCY" -> value_str
+        # 关注字段: NetLiquidation(总净值) / UnrealizedPnL(持仓浮盈) /
+        #           RealizedPnL(当前session已实现) / AvailableFunds(可用资金)
+        self._account_data: dict[str, str] = {}
+        self.ib.accountValueEvent  += self._on_account_value   # 注册一次，重连后持续有效
+        self.ib.disconnectedEvent  += self._on_ib_disconnected  # 断线时清空缓存
+
+    # ── 连接管理 ──────────────────────────────────────────────────────────
+
+    async def connect(self) -> None:
+        """连接到 TWS / IB Gateway（支持重连调用，幂等）。"""
+        if self.ib.isConnected():
+            logger.debug("IB 已连接，跳过")
+            return
+
+        logger.info(f"连接 IB: {self._host}:{self._port} clientId={self._client_id}")
+        await self.ib.connectAsync(
+            self._host,
+            self._port,
+            clientId=self._client_id,
+            readonly=False,
+        )
+        self._connected = True
+        logger.info("IB 连接成功")
+
+        self.ib.positionEvent += self._on_position_event
+        await self._fetch_initial_positions()
+
+        # reqAccountUpdates 在 ib_insync 内部会调用 run() 等待数据返回，
+        # 在 async 协程中调用会阻塞事件循环导致启动卡死。
+        # 改用真正 async 的 reqAccountSummaryAsync 做一次性快照拉取；
+        # accountValueEvent 仍保持注册，IB 主动推送时会实时更新缓存。
+        try:
+            summary = await self.ib.reqAccountSummaryAsync()
+            for val in summary:
+                self._on_account_value(val)
+            logger.info(f"已获取账户数值快照（{len(self._account_data)} 项）")
+        except Exception as e:
+            logger.warning(f"获取账户数值快照失败，权益显示可能延迟: {e}")
+
+    async def disconnect(self) -> None:
+        if self._connected:
+            self.ib.disconnect()
+            self._connected = False
+            logger.info("IB 已断开")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and self.ib.isConnected()
+
+    # ── 合约解析 ──────────────────────────────────────────────────────────
+
+    async def resolve_contract(
+        self,
+        symbol: str,
+        exchange: str,
+        currency: str,
+        expiry: str = "",
+    ):
+        """解析期货合约，expiry 为空时自动取近月合约。"""
+        if expiry:
+            contract = Future(symbol, expiry, exchange, currency=currency)
+            qualified = await self.ib.qualifyContractsAsync(contract)
+            if not qualified:
+                raise ValueError(f"合约解析失败: {symbol} {expiry} {exchange}")
+            return qualified[0]
+
+        template = Future(symbol, "", exchange, currency=currency)
+        details = await self.ib.reqContractDetailsAsync(template)
+        if not details:
+            raise ValueError(f"找不到合约详情: {symbol}@{exchange}")
+
+        today = datetime.now().strftime("%Y%m%d")
+        active = [
+            d for d in details
+            if d.contract.lastTradeDateOrContractMonth >= today
+        ]
+        if not active:
+            active = details
+        active.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
+        contract = active[0].contract
+        logger.info(f"近月合约: {symbol}@{exchange} → 到期={contract.lastTradeDateOrContractMonth}")
+        return contract
+
+    # ── K 线订阅 ──────────────────────────────────────────────────────────
+
+    async def subscribe_bars(
+        self,
+        contract,
+        timeframe: str,
+        use_rth: bool,
+        callback: Callable[[BarDataList, bool], None],
+    ) -> BarDataList:
+        bar_size = _BAR_SIZE.get(timeframe, "5 mins")
+        duration = _DURATION.get(timeframe, "2 D")
+        logger.info(f"订阅 K 线: {contract.symbol} {bar_size} duration={duration} useRTH={use_rth}")
+        # reqHistoricalData 同步版会阻塞事件循环，改用 async 版本
+        bars = await self.ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=use_rth,
+            formatDate=1,
+            keepUpToDate=True,
+        )
+        bars.updateEvent += callback
+        return bars
+
+    def cancel_bars(self, bars: BarDataList) -> None:
+        self.ib.cancelHistoricalData(bars)
+
+    # ── 持仓管理 ──────────────────────────────────────────────────────────
+
+    def register_position_callback(self, cb: Callable[[int, float, float], None]) -> None:
+        """注册持仓变动回调，参数为 (conId, quantity, avg_cost)。"""
+        self._position_callbacks.append(cb)
+
+    def get_position(self, con_id: int) -> float:
+        return self._positions.get(con_id, 0.0)
+
+    def get_avg_cost(self, con_id: int) -> float:
+        return self._avg_costs.get(con_id, 0.0)
+
+    async def _fetch_initial_positions(self) -> None:
+        positions: list[Position] = await self.ib.reqPositionsAsync()
+        self._positions.clear()
+        self._avg_costs.clear()
+        for p in positions:
+            if self._account and p.account != self._account:
+                continue
+            self._positions[p.contract.conId] = p.position
+            self._avg_costs[p.contract.conId] = p.avgCost
+        logger.info(f"初始持仓: {self._positions}")
+
+    def _on_position_event(self, position: Position) -> None:
+        if self._account and position.account != self._account:
+            return
+        con_id = position.contract.conId
+        qty = position.position
+        avg_cost = position.avgCost
+        self._positions[con_id] = qty
+        self._avg_costs[con_id] = avg_cost
+        logger.debug(f"持仓更新: conId={con_id} qty={qty} avgCost={avg_cost}")
+        for cb in self._position_callbacks:
+            cb(con_id, qty, avg_cost)
+
+    # ── 账户数值 ──────────────────────────────────────────────────────────
+
+    def _on_account_value(self, val) -> None:
+        """IB 推送账户数值时缓存关键字段。"""
+        if self._account and val.account != self._account:
+            return
+        if val.tag in ("NetLiquidation", "UnrealizedPnL", "RealizedPnL", "AvailableFunds"):
+            self._account_data[f"{val.tag}/{val.currency}"] = val.value
+
+    def _on_ib_disconnected(self) -> None:
+        """IB 断线时立即清空账户数值缓存，防止前端在重连期间显示过期数据。"""
+        self._account_data.clear()
+        logger.debug("IB 断线：账户数值缓存已清空")
+
+    def get_account_summary(self) -> dict:
+        """返回账户关键数值快照，格式：{tag: {currency: value_str}}。
+
+        示例：
+            {
+              "NetLiquidation":  {"USD": "500000.00"},
+              "UnrealizedPnL":   {"USD": "1234.50"},
+              "AvailableFunds":  {"USD": "450000.00"},
+            }
+        空字典表示尚未收到 IB 推送（连接后约 1~2 秒到达）。
+        """
+        result: dict[str, dict[str, str]] = {}
+        for key, value in self._account_data.items():
+            tag, currency = key.split("/", 1)
+            result.setdefault(tag, {})[currency] = value
+        return result
+
+    # ── 开仓下单 ──────────────────────────────────────────────────────────
+
+    def open_position(
+        self,
+        contract,
+        direction: str,      # "long" | "short"
+        qty: float,
+        order_type: str,     # "market" | "limit"
+        limit_price: Optional[float] = None,
+    ):
+        """提交开仓订单，返回 ib_insync Trade 对象（可监听 filledEvent）。"""
+        action = "BUY" if direction == "long" else "SELL"
+
+        if order_type == "market":
+            order = MarketOrder(action, qty)
+        elif order_type == "limit":
+            if limit_price is None:
+                raise ValueError("限价单必须提供 limit_price")
+            order = LimitOrder(action, qty, limit_price)
+        else:
+            raise ValueError(f"不支持的订单类型: {order_type!r}")
+
+        logger.info(f"开仓下单: {contract.symbol} {action} {qty} {order_type}"
+                    + (f" @ {limit_price}" if limit_price else ""))
+        return self.ib.placeOrder(contract, order)
+
+    # ── 止损单管理 ────────────────────────────────────────────────────────
+
+    def place_stop_order(
+        self,
+        contract,
+        position_direction: str,   # "long" | "short"（决定止损方向）
+        qty: float,
+        stop_price: float,
+    ):
+        """提交 IB 原生止损单（止损市价单 STP）。
+
+        多头止损 → SELL STP；空头止损 → BUY STP。
+        IB 服务端执行，即使 Bot 断线仍然有效。
+        """
+        action = "SELL" if position_direction == "long" else "BUY"
+        order = StopOrder(action, qty, stop_price)
+        logger.info(f"止损单: {contract.symbol} {action} {qty} STP @ {stop_price}")
+        return self.ib.placeOrder(contract, order)
+
+    def cancel_order(self, trade) -> None:
+        """撤销指定订单（传入 Trade 对象）。"""
+        try:
+            self.ib.cancelOrder(trade.order)
+            logger.info(f"撤单: orderId={trade.order.orderId}")
+        except Exception as e:
+            logger.warning(f"撤单失败: {e}")
+
+    def modify_stop_price(self, trade, new_stop_price: float) -> None:
+        """修改止损单价格（原地改价，IB 会更新现有止损单）。"""
+        trade.order.auxPrice = new_stop_price
+        self.ib.placeOrder(trade.contract, trade.order)
+        logger.info(f"修改止损价: orderId={trade.order.orderId} → {new_stop_price}")
+
+    # ── 市价平仓 ──────────────────────────────────────────────────────────
+
+    async def close_position(
+        self,
+        contract,
+        position_qty: float,
+        order_type: str = "market",
+        limit_price: Optional[float] = None,
+    ) -> bool:
+        """平掉当前持仓（市价或限价）。"""
+        if position_qty == 0:
+            logger.warning(f"close_position 调用时持仓为 0，跳过: {contract.symbol}")
+            return False
+
+        action = "SELL" if position_qty > 0 else "BUY"
+        qty = abs(position_qty)
+
+        if order_type == "limit":
+            if limit_price is None:
+                raise ValueError("限价平仓必须提供 limit_price")
+            order = LimitOrder(action, qty, limit_price)
+            logger.info(f"下单平仓: {contract.symbol} {action} {qty} @ LIMIT {limit_price}")
+            try:
+                self.ib.placeOrder(contract, order)
+                return True
+            except Exception as e:
+                logger.error(f"平仓下单异常: {contract.symbol}: {e}")
+                return False
+        else:
+            order = MarketOrder(action, qty)
+            logger.info(f"下单平仓: {contract.symbol} {action} {qty} @ MARKET")
+            try:
+                trade = self.ib.placeOrder(contract, order)
+
+                # 用 Future + 事件回调代替轮询，响应更及时
+                loop = asyncio.get_running_loop()
+                fut: asyncio.Future[bool] = loop.create_future()
+
+                def _on_filled(t):
+                    if not fut.done():
+                        fut.set_result(True)
+
+                def _on_cancelled(t):
+                    if not fut.done():
+                        fut.set_result(False)
+
+                trade.filledEvent += _on_filled
+                trade.cancelledEvent += _on_cancelled
+
+                try:
+                    success = await asyncio.wait_for(fut, timeout=30.0)
+                    if success:
+                        logger.info(
+                            f"平仓完成: {contract.symbol} avgFill={trade.orderStatus.avgFillPrice}"
+                        )
+                    else:
+                        logger.warning(f"平仓订单被取消: {contract.symbol}")
+                    return success
+                except asyncio.TimeoutError:
+                    logger.warning(f"平仓订单 30s 内未成交: {contract.symbol}")
+                    return False
+                finally:
+                    trade.filledEvent -= _on_filled
+                    trade.cancelledEvent -= _on_cancelled
+
+            except Exception as e:
+                logger.error(f"平仓下单异常: {contract.symbol}: {e}")
+                return False
+
+
+# ============================================================
+# FILE: web/schemas.py
+# ============================================================
+"""API 请求 / 响应的 Pydantic 模型。"""
+
+from __future__ import annotations
+
+from typing import Optional
+from pydantic import BaseModel
+
+
+class HealthResponse(BaseModel):
+    connected: bool
+    running: bool
+
+
+class OpenPositionRequest(BaseModel):
+    symbol: str
+    exchange: str
+    direction: str          # "long" | "short"
+    qty: float
+    order_type: str = "market"   # "market" | "limit"
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+
+
+class ManualCloseRequest(BaseModel):
+    symbol: str
+    exchange: str
+    order_type: str = "market"          # "market" | "limit"
+    limit_price: Optional[float] = None
+
+
+class SetStopRequest(BaseModel):
+    symbol: str
+    exchange: str
+    stop_price: float
+
+
+class CancelStopRequest(BaseModel):
+    symbol: str
+    exchange: str
+
+
+class UpdateStrategyRequest(BaseModel):
+    signal_cooldown_sec: Optional[int] = None
+    signal_enabled: Optional[bool] = None
+
+
+class UpdateNotifyRequest(BaseModel):
+    enabled: Optional[bool] = None
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    min_interval_sec: Optional[int] = None
+
+
+# ============================================================
+# FILE: webui/index.html
+# ============================================================
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IB Bot — 交易控制台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <div class="header-title">
+      <span class="logo">📈 IB Bot</span>
+      <span class="subtitle">期货交易控制台</span>
+    </div>
+    <div class="header-status">
+      <span id="conn-badge" class="badge badge-offline">离线</span>
+      <span id="clock" class="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <!-- ── 账户权益栏 ── -->
+  <div id="account-bar" class="account-bar">
+    <div class="acct-item">
+      <div class="acct-label">账户净值</div>
+      <div id="acct-net-liq" class="acct-val">—</div>
+    </div>
+    <div class="acct-item">
+      <div class="acct-label">持仓浮盈</div>
+      <div id="acct-unrealized-pnl" class="acct-val">—</div>
+    </div>
+    <div class="acct-item">
+      <div class="acct-label" title="当前 IB session 内已平仓的累计盈亏">已实现</div>
+      <div id="acct-realized-pnl" class="acct-val">—</div>
+    </div>
+    <div class="acct-item">
+      <div class="acct-label">可用资金</div>
+      <div id="acct-avail-funds" class="acct-val">—</div>
+    </div>
+  </div>
+
+  <main>
+
+    <!-- ── 合约监控卡片 ── -->
+    <section>
+      <h2>合约监控</h2>
+      <div id="contracts-grid" class="contracts-grid">
+        <div class="empty-hint">等待数据…</div>
+      </div>
+    </section>
+
+    <!-- ── 手动交易面板 ── -->
+    <section>
+      <h2>手动交易</h2>
+      <div class="panel">
+        <div class="form-row">
+          <label>合约</label>
+          <select id="trade-key"></select>
+        </div>
+        <div class="form-row">
+          <label>操作</label>
+          <div class="btn-group">
+            <button id="btn-open"  class="btn btn-trade active" onclick="setAction('open')">开仓</button>
+            <button id="btn-close" class="btn btn-trade"        onclick="setAction('close')">平仓</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>方向</label>
+          <div class="btn-group">
+            <button id="btn-long"  class="btn btn-long  active" onclick="setDirection('long')">做多 Long</button>
+            <button id="btn-short" class="btn btn-short"        onclick="setDirection('short')">做空 Short</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>类型</label>
+          <div class="btn-group">
+            <button id="btn-mkt" class="btn btn-otype active" onclick="setOrderType('market')">市价 Market</button>
+            <button id="btn-lmt" class="btn btn-otype"        onclick="setOrderType('limit')">限价 Limit</button>
+          </div>
+        </div>
+        <div class="form-row" id="row-qty">
+          <label>手数</label>
+          <input id="trade-qty" type="number" min="1" step="1" value="1" />
+        </div>
+        <div class="form-row" id="row-limit-price" style="display:none">
+          <label>限价</label>
+          <input id="trade-limit-price" type="number" step="0.25" placeholder="限价价格" />
+        </div>
+        <div class="form-row" id="row-stop-price">
+          <label>止损价 <small style="color:var(--text-dim)">(可选)</small></label>
+          <input id="trade-stop-price" type="number" step="0.25" placeholder="留空则不挂止损单" />
+        </div>
+        <div class="form-row">
+          <button class="btn btn-primary" onclick="submitTrade()">提交</button>
+        </div>
+        <div id="trade-msg" class="msg"></div>
+      </div>
+    </section>
+
+    <!-- ── 止损管理 ── -->
+    <section>
+      <h2>止损管理</h2>
+      <div class="panel">
+        <div class="form-row">
+          <label>合约</label>
+          <select id="stop-key"></select>
+        </div>
+        <div class="form-row">
+          <label>止损价</label>
+          <input id="stop-price" type="number" step="0.25" placeholder="新止损价" />
+        </div>
+        <div class="form-row" style="gap:8px">
+          <button class="btn btn-warning" onclick="submitSetStop()">设置/修改止损</button>
+          <button class="btn btn-secondary" onclick="submitCancelStop()">撤销止损单</button>
+        </div>
+        <div id="stop-msg" class="msg"></div>
+      </div>
+    </section>
+
+    <!-- ── 策略参数 ── -->
+    <section>
+      <h2>策略参数</h2>
+      <div class="panel">
+        <div class="form-row">
+          <label>双K止损信号</label>
+          <div class="toggle-row">
+            <label class="toggle-switch">
+              <input type="checkbox" id="signal-enabled" onchange="setSignalEnabled(this.checked)" checked />
+              <span class="toggle-slider"></span>
+            </label>
+            <span id="signal-label" class="toggle-label on">已启用</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>信号冷却（秒）</label>
+          <input id="param-cooldown" type="number" min="0" step="1" placeholder="30" />
+        </div>
+        <div class="form-row">
+          <button class="btn btn-primary" onclick="saveStrategy()">保存冷却时间</button>
+        </div>
+        <div id="strategy-msg" class="msg"></div>
+      </div>
+    </section>
+
+    <!-- ── 通知 ── -->
+    <section>
+      <h2>Telegram 通知</h2>
+      <div class="panel">
+        <div class="form-row">
+          <button class="btn btn-secondary" onclick="testNotify()">发送测试消息</button>
+        </div>
+        <div id="notify-msg" class="msg"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
+
+# ============================================================
+# FILE: webui/app.js
+# ============================================================
+'use strict';
+
+// ── 时钟 ──────────────────────────────────────────────────────────────────
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN');
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── 交易面板状态 ──────────────────────────────────────────────────────────
+let _action    = 'open';    // 'open' | 'close'
+let _direction = 'long';    // 'long' | 'short'
+let _orderType = 'market';  // 'market' | 'limit'
+
+function setAction(a) {
+  _action = a;
+  document.getElementById('btn-open').classList.toggle('active', a === 'open');
+  document.getElementById('btn-close').classList.toggle('active', a === 'close');
+  // 平仓时不需要手数和止损价
+  document.getElementById('row-qty').style.display        = a === 'open' ? 'flex' : 'none';
+  document.getElementById('row-stop-price').style.display = a === 'open' ? 'flex' : 'none';
+}
+
+function setDirection(d) {
+  _direction = d;
+  document.getElementById('btn-long').classList.toggle('active', d === 'long');
+  document.getElementById('btn-short').classList.toggle('active', d === 'short');
+}
+
+function setOrderType(t) {
+  _orderType = t;
+  document.getElementById('btn-mkt').classList.toggle('active', t === 'market');
+  document.getElementById('btn-lmt').classList.toggle('active', t === 'limit');
+  document.getElementById('row-limit-price').style.display = t === 'limit' ? 'flex' : 'none';
+}
+
+// ── 数据轮询 ──────────────────────────────────────────────────────────────
+let _lastStatus = null;
+
+async function fetchStatus() {
+  try {
+    const res = await fetch('/api/status');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _lastStatus = await res.json();
+    render(_lastStatus);
+  } catch {
+    setConnBadge({ connected: false, running: false, reconnecting: false });
+  }
+}
+setInterval(fetchStatus, 1000);
+fetchStatus();
+
+// ── 渲染 ──────────────────────────────────────────────────────────────────
+function render(data) {
+  setConnBadge(data);
+  syncSignalToggle(data.signal_enabled !== false);
+  renderAccount(data.account || {});
+  renderContracts(data.contracts || []);
+  syncSelects(data.contracts || []);
+}
+
+function syncSignalToggle(enabled) {
+  const cb  = document.getElementById('signal-enabled');
+  const lbl = document.getElementById('signal-label');
+  if (cb)  cb.checked = enabled;
+  if (lbl) {
+    lbl.textContent = enabled ? '已启用' : '已暂停';
+    lbl.className   = 'toggle-label ' + (enabled ? 'on' : 'off');
+  }
+}
+
+// ── 账户权益栏 ──────────────────────────────────────────────────────────
+function renderAccount(acct) {
+  // BASE = IB 将所有币种折算为账户基础货币的合并总权益，必须最优先。
+  // 多币种账户（如同时跑 ES+HSI）若优先取 USD，港币部分权益会被丢弃。
+  function pickPrimary(obj) {
+    if (!obj || !Object.keys(obj).length) return { val: null, ccy: '' };
+    if (obj['BASE'] != null) return { val: obj['BASE'], ccy: 'BASE' };
+    if (obj['USD']  != null) return { val: obj['USD'],  ccy: 'USD'  };
+    if (obj['HKD']  != null) return { val: obj['HKD'],  ccy: 'HKD'  };
+    const k = Object.keys(obj)[0];
+    return { val: obj[k], ccy: k };
+  }
+
+  const { val: nl,  ccy: nlCcy } = pickPrimary(acct.NetLiquidation);
+  const { val: pnl }             = pickPrimary(acct.UnrealizedPnL);
+  const { val: rpnl }            = pickPrimary(acct.RealizedPnL);
+  const { val: af }              = pickPrimary(acct.AvailableFunds);
+
+  // 账户净值（BASE 时不显示货币标签，单币种账户正常显示）
+  const nlEl = document.getElementById('acct-net-liq');
+  nlEl.textContent = nl != null
+    ? `${fmtAcct(nl)}${nlCcy && nlCcy !== 'BASE' ? ' ' + nlCcy : ''}`
+    : '—';
+
+  // 持仓浮盈（UnrealizedPnL，仅当前未平仓头寸）
+  setPnlEl('acct-unrealized-pnl', pnl);
+
+  // 已实现盈亏（RealizedPnL，当前 IB session 内已平仓盈亏）
+  setPnlEl('acct-realized-pnl', rpnl);
+
+  // 可用资金
+  document.getElementById('acct-avail-funds').textContent = af != null ? fmtAcct(af) : '—';
+}
+
+function setPnlEl(id, val) {
+  const el = document.getElementById(id);
+  if (val != null) {
+    const n = parseFloat(val);
+    el.textContent = (n >= 0 ? '+' : '') + fmtAcct(val);
+    el.className = 'acct-val ' + (n > 0 ? 'pos' : n < 0 ? 'neg' : '');
+  } else {
+    el.textContent = '—';
+    el.className = 'acct-val';
+  }
+}
+
+function fmtAcct(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return String(v);
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function setConnBadge(data) {
+  const el = document.getElementById('conn-badge');
+  if (data.connected && data.running) {
+    el.textContent = '已连接';
+    el.className = 'badge badge-online';
+  } else if (data.reconnecting) {
+    el.textContent = `重连中… (第${data.reconnect_attempt + 1}次)`;
+    el.className = 'badge badge-reconnecting';
+  } else {
+    el.textContent = '离线';
+    el.className = 'badge badge-offline';
+  }
+}
+
+// ── 合约卡片 ──────────────────────────────────────────────────────────────
+function renderContracts(contracts) {
+  const grid = document.getElementById('contracts-grid');
+  if (!contracts.length) { grid.innerHTML = '<div class="empty-hint">无启用合约</div>'; return; }
+
+  const keys = contracts.map(c => `${c.symbol}@${c.exchange}`);
+  [...grid.children].forEach(el => { if (!keys.includes(el.dataset.key)) el.remove(); });
+
+  contracts.forEach(c => {
+    const key = `${c.symbol}@${c.exchange}`;
+    let card = grid.querySelector(`[data-key="${key}"]`);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'contract-card';
+      card.dataset.key = key;
+      grid.appendChild(card);
+    }
+    card.innerHTML = buildCard(c);
+  });
+}
+
+function fmt(v, d = 2) {
+  if (v == null) return '—';
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function buildCard(c) {
+  const posClass = c.position_side === 'long' ? 'pos-long' : c.position_side === 'short' ? 'pos-short' : 'pos-flat';
+  const posLabel = c.position_side === 'long'  ? `多头 ${c.position}` :
+                   c.position_side === 'short' ? `空头 ${Math.abs(c.position)}` : '平仓';
+
+  // 持仓信息行
+  let posInfoHTML = '';
+  if (c.position_side !== 'flat') {
+    const pnlClass = c.pnl_pts > 0 ? 'pnl-pos' : c.pnl_pts < 0 ? 'pnl-neg' : '';
+    posInfoHTML = `
+      <div class="pos-info-row">
+        <div class="pos-info-cell">
+          <div class="label">开仓均价</div>
+          <div class="val">${fmt(c.entry_price, 2)}</div>
+        </div>
+        <div class="pos-info-cell">
+          <div class="label">当前价</div>
+          <div class="val">${fmt(c.current_price, 2)}</div>
+        </div>
+        <div class="pos-info-cell">
+          <div class="label">止损价</div>
+          <div class="val" style="color:var(--red)">${fmt(c.stop_price, 2)}</div>
+        </div>
+        <div class="pos-info-cell">
+          <div class="label">浮动盈亏(pt)</div>
+          <div class="val ${pnlClass}">${fmt(c.pnl_pts, 2)}</div>
+        </div>
+      </div>`;
+  }
+
+  // K线数据行
+  const kn = c.current_bar;
+  const k1 = c.k1;
+  const k2 = c.k2;
+  const klineHTML = c.klines_ready && kn ? `
+    <div class="kline-row">
+      ${klineCell('Kn 价', kn.close)}
+      ${klineCell('Kn 高', kn.high, 'var(--green)')}
+      ${klineCell('K-1 高', k1?.high, 'var(--green)')} ${klineCell('K-2 高', k2?.high, 'var(--green)')}
+    </div>
+    <div class="kline-row">
+      ${klineCell('成交量', kn.volume, null, 0)} ${klineCell('Kn 低', kn.low, 'var(--red)')}
+      ${klineCell('K-1 低', k1?.low, 'var(--red)')} ${klineCell('K-2 低', k2?.low, 'var(--red)')}
+    </div>`
+    : `<div class="not-ready-hint">⏳ K 线缓冲区预热中（${c.bars_buffered}/2 根）</div>`;
+
+  const sigOn = _lastStatus && _lastStatus.signal_enabled !== false;
+  const sigText = sigOn ? (c.last_signal || '—') : '已暂停';
+  const sigClass = !sigOn ? 'signal-paused' :
+                   c.last_signal === 'CLOSE_LONG'  ? 'signal-close-long'  :
+                   c.last_signal === 'CLOSE_SHORT' ? 'signal-close-short' : 'signal-none';
+  const sigTime = c.last_signal_time ? ` @ ${c.last_signal_time.slice(11, 19)}` : '';
+
+  return `
+    <div class="card-header">
+      <span class="card-title">${c.symbol}
+        <small style="font-weight:400;font-size:12px;color:var(--text-dim)">${c.exchange} ${c.timeframe} ${c.expiry || '近月'}</small>
+      </span>
+      <span class="pos-badge ${posClass}">${posLabel}</span>
+    </div>
+    <div class="card-body">
+      ${posInfoHTML}
+      ${klineHTML}
+      <div class="signal-row ${sigClass}">双K止损信号: ${sigText}${sigTime}</div>
+    </div>`;
+}
+
+function klineCell(label, val, color, d = 2) {
+  return `<div class="kline-cell">
+    <div class="label">${label}</div>
+    <div class="val" style="${color ? `color:${color}` : ''}">${fmt(val, d)}</div>
+  </div>`;
+}
+
+// ── 下拉框同步 ───────────────────────────────────────────────────────────
+function syncSelects(contracts) {
+  ['trade-key', 'stop-key'].forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    const opts = contracts.map(c => {
+      const key = `${c.symbol}@${c.exchange}`;
+      const pos = c.position !== 0 ? ` [${c.position > 0 ? '多' : '空'} ${Math.abs(c.position)}]` : '';
+      const stop = c.stop_price ? ` SL:${c.stop_price}` : '';
+      return `<option value="${key}"${key === cur ? ' selected' : ''}>${c.symbol}@${c.exchange}${pos}${stop}</option>`;
+    });
+    sel.innerHTML = '<option value="">— 选择合约 —</option>' + opts.join('');
+    if (cur) sel.value = cur;
+  });
+}
+
+// ── 统一交易提交 ──────────────────────────────────────────────────────────
+async function submitTrade() {
+  const key = document.getElementById('trade-key').value;
+  if (!key) return showMsg('trade-msg', '请选择合约', false);
+  const [symbol, exchange] = key.split('@');
+
+  if (_action === 'open') {
+    const qty = parseFloat(document.getElementById('trade-qty').value);
+    if (!qty || qty <= 0) return showMsg('trade-msg', '手数必须大于 0', false);
+
+    const body = { symbol, exchange, direction: _direction, qty, order_type: _orderType };
+
+    if (_orderType === 'limit') {
+      const lp = parseFloat(document.getElementById('trade-limit-price').value);
+      if (!lp) return showMsg('trade-msg', '限价单必须填限价', false);
+      body.limit_price = lp;
+    }
+
+    const sp = parseFloat(document.getElementById('trade-stop-price').value);
+    if (sp) body.stop_price = sp;
+
+    const dir = _direction === 'long' ? '多' : '空';
+    const typeLabel = _orderType === 'market' ? '市价' : `限价`;
+    await apiCall('/api/trade/open', body, 'trade-msg',
+      `开仓已发送（${dir} ${qty} 手 ${typeLabel}${sp ? ' 止损@' + sp : ''}）`);
+
+  } else {
+    const body = { symbol, exchange, order_type: _orderType };
+
+    if (_orderType === 'limit') {
+      const lp = parseFloat(document.getElementById('trade-limit-price').value);
+      if (!lp) return showMsg('trade-msg', '限价平仓必须填限价', false);
+      body.limit_price = lp;
+    }
+
+    const typeLabel = _orderType === 'market' ? '市价' : '限价';
+    await apiCall('/api/trade/close', body, 'trade-msg', `平仓已发送（${typeLabel}）`);
+  }
+}
+
+// ── 止损设置 ──────────────────────────────────────────────────────────────
+async function submitSetStop() {
+  const key = document.getElementById('stop-key').value;
+  if (!key) return showMsg('stop-msg', '请选择合约', false);
+  const sp = parseFloat(document.getElementById('stop-price').value);
+  if (!sp) return showMsg('stop-msg', '请填写止损价', false);
+  const [symbol, exchange] = key.split('@');
+  await apiCall('/api/trade/set_stop', { symbol, exchange, stop_price: sp }, 'stop-msg', `止损价已设置: ${sp}`);
+}
+
+async function submitCancelStop() {
+  const key = document.getElementById('stop-key').value;
+  if (!key) return showMsg('stop-msg', '请选择合约', false);
+  const [symbol, exchange] = key.split('@');
+  await apiCall('/api/trade/cancel_stop', { symbol, exchange }, 'stop-msg', '止损单已撤销');
+}
+
+// ── 策略参数 ──────────────────────────────────────────────────────────────
+async function setSignalEnabled(enabled) {
+  await apiCall('/api/params/strategy', { signal_enabled: enabled }, 'strategy-msg',
+    enabled ? '双K止损已启用' : '双K止损已暂停');
+}
+
+async function saveStrategy() {
+  const v = document.getElementById('param-cooldown').value;
+  if (!v) return;
+  await apiCall('/api/params/strategy', { signal_cooldown_sec: parseInt(v) }, 'strategy-msg', '冷却时间已保存');
+}
+
+// ── 通知测试 ──────────────────────────────────────────────────────────────
+async function testNotify() {
+  await apiCall('/api/notify/test', null, 'notify-msg', 'Telegram 消息已发送', 'POST', true);
+}
+
+// ── 通用请求工具 ──────────────────────────────────────────────────────────
+async function apiCall(url, body, msgId, successText, method = 'POST', noBody = false) {
+  try {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (!noBody && body) opts.body = JSON.stringify(body);
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (res.ok) showMsg(msgId, successText, true);
+    else showMsg(msgId, data.detail || '操作失败', false);
+  } catch (e) {
+    showMsg(msgId, `网络错误: ${e.message}`, false);
+  }
+}
+
+function showMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'msg ' + (ok ? 'ok' : 'err');
+  setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, 5000);
+}
+
+
+# ============================================================
+# FILE: webui/styles.css
+# ============================================================
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f1117;
+  --bg2: #1a1d27;
+  --bg3: #22263a;
+  --border: #2e3348;
+  --text: #e2e8f0;
+  --text-dim: #8892a4;
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #f59e0b;
+  --blue: #3b82f6;
+  --purple: #8b5cf6;
+  --radius: 10px;
+  --font: 'Segoe UI', system-ui, sans-serif;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 14px;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 24px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-title { display: flex; align-items: center; gap: 10px; }
+.logo { font-size: 20px; font-weight: 700; }
+.subtitle { color: var(--text-dim); font-size: 13px; }
+
+.header-status { display: flex; align-items: center; gap: 14px; }
+
+.badge {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-weight: 600;
+  letter-spacing: .5px;
+}
+.badge-online       { background: rgba(34,197,94,.2);  color: var(--green);  }
+.badge-offline      { background: rgba(239,68,68,.2);  color: var(--red);    }
+.badge-reconnecting { background: rgba(245,158,11,.2); color: var(--yellow); }
+
+.clock { color: var(--text-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* ── Account Equity Bar ── */
+.account-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  padding: 8px 24px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+
+.acct-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 24px 4px 0;
+  margin-right: 24px;
+  border-right: 1px solid var(--border);
+}
+.acct-item:last-child { border-right: none; margin-right: 0; }
+
+.acct-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+
+.acct-val {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.acct-val.pos { color: var(--green); }
+.acct-val.neg { color: var(--red);   }
+
+/* ── Main ── */
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+section h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  margin-bottom: 12px;
+}
+
+/* ── Contracts Grid ── */
+.contracts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+
+.empty-hint { color: var(--text-dim); padding: 20px; }
+
+.contract-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: border-color .2s;
+}
+.contract-card:hover { border-color: var(--blue); }
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.pos-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-weight: 600;
+}
+.pos-long  { background: rgba(34,197,94,.2);  color: var(--green); }
+.pos-short { background: rgba(239,68,68,.2);  color: var(--red);   }
+.pos-flat  { background: rgba(148,163,184,.1); color: var(--text-dim); }
+
+.card-body { display: flex; flex-direction: column; gap: 8px; }
+
+.kline-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.kline-cell {
+  background: var(--bg3);
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-align: center;
+}
+.kline-cell .label { font-size: 10px; color: var(--text-dim); margin-bottom: 2px; }
+.kline-cell .val   { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.info-row span:last-child { color: var(--text); }
+
+.signal-row {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  text-align: center;
+}
+.signal-close-long  { background: rgba(239,68,68,.15);  color: var(--red);    }
+.signal-close-short { background: rgba(34,197,94,.15);  color: var(--green);  }
+.signal-none        { background: var(--bg3); color: var(--text-dim); }
+.signal-paused      { background: rgba(245,158,11,.1); color: var(--yellow); }
+
+.not-ready-hint {
+  font-size: 12px;
+  color: var(--yellow);
+  background: rgba(245,158,11,.1);
+  border-radius: 6px;
+  padding: 4px 8px;
+  text-align: center;
+}
+
+/* ── Panel ── */
+.panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 480px;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.form-row label {
+  width: 130px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.form-row input,
+.form-row select {
+  flex: 1;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.form-row input:focus,
+.form-row select:focus { border-color: var(--blue); }
+
+/* ── Buttons ── */
+.btn {
+  padding: 8px 20px;
+  border-radius: 6px;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+.btn:hover  { opacity: .85; }
+.btn:active { opacity: .7;  }
+
+.btn-primary   { background: var(--blue);   color: #fff; }
+.btn-danger    { background: var(--red);    color: #fff; }
+.btn-secondary { background: var(--bg3);    color: var(--text); border: 1px solid var(--border); }
+.btn-warning   { background: var(--yellow); color: #000; }
+.btn-long      { background: rgba(34,197,94,.2);  color: var(--green); border: 1px solid rgba(34,197,94,.4); }
+.btn-short     { background: rgba(239,68,68,.2);  color: var(--red);   border: 1px solid rgba(239,68,68,.4); }
+.btn-long.active  { background: var(--green); color: #000; border-color: var(--green); }
+.btn-short.active { background: var(--red);   color: #fff; border-color: var(--red);   }
+
+/* 开仓/平仓 切换 */
+.btn-trade { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+#btn-open.active  { background: var(--blue); color: #fff; border-color: var(--blue); }
+#btn-close.active { background: var(--red);  color: #fff; border-color: var(--red);  }
+
+/* 市价/限价 切换 */
+.btn-otype { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+.btn-otype.active { background: var(--purple); color: #fff; border-color: var(--purple); }
+
+/* ── Button Group ── */
+.btn-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── Position Info Row (in contract card) ── */
+.pos-info-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.pos-info-cell {
+  background: var(--bg3);
+  border-radius: 6px;
+  padding: 6px 8px;
+  text-align: center;
+}
+.pos-info-cell .label { font-size: 10px; color: var(--text-dim); margin-bottom: 2px; }
+.pos-info-cell .val   { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.pnl-pos { color: var(--green); }
+.pnl-neg { color: var(--red);   }
+
+/* ── Messages ── */
+.msg {
+  font-size: 12px;
+  min-height: 18px;
+  color: var(--text-dim);
+}
+.msg.ok  { color: var(--green); }
+.msg.err { color: var(--red);   }
+
+/* ── Toggle Switch ── */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 46px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  transition: .2s;
+}
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  width: 16px; height: 16px;
+  left: 3px; bottom: 3px;
+  background: var(--text-dim);
+  border-radius: 50%;
+  transition: .2s;
+}
+.toggle-switch input:checked + .toggle-slider {
+  background: rgba(34,197,94,.25);
+  border-color: var(--green);
+}
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(22px);
+  background: var(--green);
+}
+
+.toggle-label      { font-size: 13px; font-weight: 600; }
+.toggle-label.on   { color: var(--green);  }
+.toggle-label.off  { color: var(--yellow); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+

@@ -99,7 +99,7 @@ class KlineBuffer:
         """返回 (Kn, K-1, K-2)，未就绪时返回 None。"""
         if not self.ready:
             return None
-        k2, k1 = self.completed[0], self.completed[1]
+        k2, k1 = self.completed[-2], self.completed[-1]
         return self.current, k1, k2
 
 
