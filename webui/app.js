@@ -147,12 +147,16 @@ function renderContracts(contracts) {
     const key = `${c.symbol}@${c.exchange}`;
     let card = grid.querySelector(`[data-key="${key}"]`);
     if (!card) {
+      // 首次建卡：display 区（每秒刷新）+ controls 区（只建一次，不被轮询覆盖）
       card = document.createElement('div');
       card.className = 'contract-card';
       card.dataset.key = key;
+      card.innerHTML = '<div class="card-display"></div>' + buildCardControls(c);
       grid.appendChild(card);
     }
-    card.innerHTML = buildCard(c);
+    // 每秒只更新 display 区，controls 区保持不动
+    card.querySelector('.card-display').innerHTML = buildCardDisplay(c);
+    syncCardControlValues(card, c);
   });
 }
 
@@ -161,7 +165,8 @@ function fmt(v, d = 2) {
   return Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
-function buildCard(c) {
+// buildCardDisplay — 每秒刷新的显示区（状态、K线、信号）
+function buildCardDisplay(c) {
   const posClass = c.position_side === 'long' ? 'pos-long' : c.position_side === 'short' ? 'pos-short' : 'pos-flat';
   const posLabel = c.position_side === 'long'  ? `多头 ${c.position}` :
                    c.position_side === 'short' ? `空头 ${Math.abs(c.position)}` : '平仓';
@@ -207,7 +212,7 @@ function buildCard(c) {
     </div>`
     : `<div class="not-ready-hint">⏳ K 线缓冲区预热中（${c.bars_buffered}/2 根）</div>`;
 
-  // 抄底摸顶目标价行
+  // 抄底摸顶当前目标价标签（只读展示）
   let reversalHTML = '';
   if (c.buy_target || c.sell_target) {
     const buyPart  = c.buy_target  ? `<span class="reversal-buy">抄底 ${fmt(c.buy_target)}</span>`   : '';
@@ -245,9 +250,42 @@ function klineCell(label, val, color, d = 2) {
   </div>`;
 }
 
+// buildCardControls — 只建一次的抄底/摸顶输入区（不被轮询覆盖）
+function buildCardControls(c) {
+  const key    = `${c.symbol}@${c.exchange}`;
+  const safeId = key.replace('@', '-');
+  return `
+    <div class="card-controls">
+      <div class="ctrl-label">抄底 / 摸顶</div>
+      <div class="ctrl-row">
+        <input id="rc-buy-${safeId}"  class="ctrl-input" type="number" step="0.25" placeholder="抄底价" />
+        <input id="rc-sell-${safeId}" class="ctrl-input" type="number" step="0.25" placeholder="摸顶价" />
+        <input id="rc-qty-${safeId}"  class="ctrl-input ctrl-qty" type="number" min="1" step="1" placeholder="手数" />
+        <button class="btn btn-xs btn-primary"   onclick="setCardReversal('${key}')">设置</button>
+        <button class="btn btn-xs btn-secondary" onclick="clearCardReversal('${key}')">清空</button>
+      </div>
+      <div id="rc-msg-${safeId}" class="msg"></div>
+    </div>`;
+}
+
+// 同步卡片输入框的 placeholder 显示当前值（仅当该输入框未被聚焦时）
+function syncCardControlValues(card, c) {
+  const key    = `${c.symbol}@${c.exchange}`;
+  const safeId = key.replace('@', '-');
+  const buyEl  = document.getElementById(`rc-buy-${safeId}`);
+  const sellEl = document.getElementById(`rc-sell-${safeId}`);
+  const qtyEl  = document.getElementById(`rc-qty-${safeId}`);
+  if (buyEl  && document.activeElement !== buyEl)
+    buyEl.placeholder  = c.buy_target  ? `抄底 ${fmt(c.buy_target)}`  : '抄底价';
+  if (sellEl && document.activeElement !== sellEl)
+    sellEl.placeholder = c.sell_target ? `摸顶 ${fmt(c.sell_target)}` : '摸顶价';
+  if (qtyEl  && document.activeElement !== qtyEl && !qtyEl.value)
+    qtyEl.placeholder  = `手数 (当前 ${c.reversal_qty})`;
+}
+
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
 function syncSelects(contracts) {
-  ['trade-key', 'stop-key', 'reversal-key'].forEach(id => {
+  ['trade-key', 'stop-key'].forEach(id => {
     const sel = document.getElementById(id);
     const cur = sel.value;
     const opts = contracts.map(c => {
@@ -318,30 +356,34 @@ async function submitCancelStop() {
   await apiCall('/api/trade/cancel_stop', { symbol, exchange }, 'stop-msg', '止损单已撤销');
 }
 
-// ── 抄底摸顶 ──────────────────────────────────────────────────────────────
-async function submitReversal() {
-  const key = document.getElementById('reversal-key').value;
-  if (!key) return showMsg('reversal-msg', '请选择合约', false);
+// ── 抄底摸顶（卡片内联操作）────────────────────────────────────────────
+async function setCardReversal(key) {
+  const safeId = key.replace('@', '-');
   const [symbol, exchange] = key.split('@');
-  const buy  = parseFloat(document.getElementById('reversal-buy').value);
-  const sell = parseFloat(document.getElementById('reversal-sell').value);
-  const qty  = parseFloat(document.getElementById('reversal-qty').value);
+  const buy  = parseFloat(document.getElementById(`rc-buy-${safeId}`).value);
+  const sell = parseFloat(document.getElementById(`rc-sell-${safeId}`).value);
+  const qty  = parseFloat(document.getElementById(`rc-qty-${safeId}`).value);
   const body = { symbol, exchange };
   if (!isNaN(buy)  && buy  > 0) body.buy_target  = buy;
   if (!isNaN(sell) && sell > 0) body.sell_target = sell;
   if (!isNaN(qty)  && qty  > 0) body.qty = qty;
-  if (!body.buy_target && !body.sell_target) return showMsg('reversal-msg', '请至少填写一个目标价', false);
+  if (!body.buy_target && !body.sell_target)
+    return showMsg(`rc-msg-${safeId}`, '请至少填写一个目标价', false);
   const parts = [];
   if (body.buy_target)  parts.push(`抄底@${buy}`);
   if (body.sell_target) parts.push(`摸顶@${sell}`);
-  await apiCall('/api/params/reversal', body, 'reversal-msg', `已设置: ${parts.join(' / ')}`);
+  await apiCall('/api/params/reversal', body, `rc-msg-${safeId}`, `已设置: ${parts.join(' / ')}`);
+  // 设置成功后清空输入框
+  document.getElementById(`rc-buy-${safeId}`).value  = '';
+  document.getElementById(`rc-sell-${safeId}`).value = '';
 }
 
-async function clearReversal() {
-  const key = document.getElementById('reversal-key').value;
-  if (!key) return showMsg('reversal-msg', '请选择合约', false);
+async function clearCardReversal(key) {
+  const safeId = key.replace('@', '-');
   const [symbol, exchange] = key.split('@');
-  await apiCall('/api/params/reversal', { symbol, exchange, buy_target: 0, sell_target: 0 }, 'reversal-msg', '抄底/摸顶目标价已清空');
+  await apiCall('/api/params/reversal',
+    { symbol, exchange, buy_target: 0, sell_target: 0 },
+    `rc-msg-${safeId}`, '已清空');
 }
 
 // ── 策略参数 ──────────────────────────────────────────────────────────────
