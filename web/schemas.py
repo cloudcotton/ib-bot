@@ -44,6 +44,14 @@ class UpdateStrategyRequest(BaseModel):
     signal_enabled: Optional[bool] = None
 
 
+class SetReversalRequest(BaseModel):
+    symbol: str
+    exchange: str
+    buy_target: Optional[float] = None   # None=不变, 0=清空, >0=设置抄底价
+    sell_target: Optional[float] = None  # None=不变, 0=清空, >0=设置摸顶价
+    qty: Optional[float] = None          # None=不变, >0=更新开仓手数
+
+
 class UpdateNotifyRequest(BaseModel):
     enabled: Optional[bool] = None
     telegram_bot_token: Optional[str] = None

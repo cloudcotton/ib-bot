@@ -293,6 +293,21 @@ section h2 {
 .pnl-pos { color: var(--green); }
 .pnl-neg { color: var(--red);   }
 
+/* ── Reversal Targets ── */
+.reversal-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding: 4px 6px;
+  background: var(--bg3);
+  border-radius: 6px;
+}
+.reversal-buy  { color: var(--green); font-weight: 600; }
+.reversal-sell { color: var(--red);   font-weight: 600; }
+.reversal-qty  { color: var(--text-dim); margin-left: auto; }
+
 /* ── Messages ── */
 .msg {
   font-size: 12px;

@@ -11,6 +11,7 @@ from web.schemas import (
     HealthResponse,
     ManualCloseRequest,
     OpenPositionRequest,
+    SetReversalRequest,
     SetStopRequest,
     UpdateNotifyRequest,
     UpdateStrategyRequest,
@@ -120,6 +121,22 @@ async def manual_close(body: ManualCloseRequest, request: Request):
 
 
 # ── 参数热更新 ──────────────────────────────────────────────────────────────
+
+
+@router.post("/params/reversal")
+async def set_reversal(body: SetReversalRequest, request: Request):
+    """设置/清除指定合约的抄底/摸顶目标价及开仓手数。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    result = await e.set_reversal_prices(
+        key=key,
+        buy_target=body.buy_target,
+        sell_target=body.sell_target,
+        qty=body.qty,
+    )
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "设置失败"))
+    return result
 
 
 @router.post("/params/strategy")

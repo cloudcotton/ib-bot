@@ -116,6 +116,34 @@
       </div>
     </section>
 
+    <!-- ── 抄底摸顶 ── -->
+    <section>
+      <h2>抄底 / 摸顶</h2>
+      <div class="panel">
+        <div class="form-row">
+          <label>合约</label>
+          <select id="reversal-key"></select>
+        </div>
+        <div class="form-row">
+          <label>手数</label>
+          <input id="reversal-qty" type="number" min="1" step="1" value="1" />
+        </div>
+        <div class="form-row">
+          <label>抄底价</label>
+          <input id="reversal-buy" type="number" step="0.25" placeholder="低点触及收盘回升则买入" />
+        </div>
+        <div class="form-row">
+          <label>摸顶价</label>
+          <input id="reversal-sell" type="number" step="0.25" placeholder="高点触及收盘回落则卖出" />
+        </div>
+        <div class="form-row" style="gap:8px">
+          <button class="btn btn-primary" onclick="submitReversal()">设置</button>
+          <button class="btn btn-secondary" onclick="clearReversal()">清空</button>
+        </div>
+        <div id="reversal-msg" class="msg"></div>
+      </div>
+    </section>
+
     <!-- ── 策略参数 ── -->
     <section>
       <h2>策略参数</h2>

@@ -82,6 +82,11 @@ class ContractMonitor:
         self._last_signal_time: dict[str, datetime] = {}
         self._last_signal: Optional[str] = None
 
+        # 抄底摸顶目标价（None 表示未设置）
+        self._buy_target: Optional[float] = None   # 抄底价：低点触及后收盘回升则买入
+        self._sell_target: Optional[float] = None  # 摸顶价：高点触及后收盘回落则卖出
+        self._reversal_qty: float = 1.0            # 抄底/摸顶开仓手数
+
     # ── 持仓更新（IBClient 回调）──────────────────────────────────────────
 
     def update_position(self, qty: float, avg_cost: float = 0.0) -> None:
@@ -135,10 +140,12 @@ class ContractMonitor:
             else:
                 if has_new_bar and len(bars) >= 2:
                     b = bars[-2]
-                    self.buffer.add_completed(Bar(
+                    completed = Bar(
                         time=str(b.date), open=float(b.open), high=float(b.high),
                         low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                    ))
+                    )
+                    self.buffer.add_completed(completed)
+                    self._check_reversal_entry(completed)  # K线收盘时检查抄底/摸顶
                 b = bars[-1]
                 self.buffer.update_current(Bar(
                     time=str(b.date), open=float(b.open), high=float(b.high),
@@ -169,6 +176,103 @@ class ContractMonitor:
         logger.info(f"[{self.cfg.key}] 双K止损信号: {signal.value} 持仓={self._position}")
         _safe_ensure_future(self._execute_close(signal, reason="双K止损"),
                             label=f"{self.cfg.key} _execute_close")
+
+    def _check_reversal_entry(self, bar: Bar) -> None:
+        """K 线收盘时检查抄底/摸顶开仓信号。
+        仅当双K止损启用且当前无持仓时触发。
+        - 抄底：bar.low < buy_target  且  bar.close >= buy_target → 买入
+        - 摸顶：bar.high > sell_target 且  bar.close <= sell_target → 卖出
+        价格一旦突破目标价（不论是否开仓），目标价立即清零。
+        若同一根K线同时满足抄底和摸顶条件，两个目标价均清零，但均不开仓（信号矛盾）。
+        """
+        if not self._signal_enabled:
+            return
+        if self._position != 0:
+            return
+
+        # 第一步：检测各目标价是否被突破，先统一清零（不论收盘如何）
+        buy_triggered  = False   # 低点突破了抄底价
+        sell_triggered = False   # 高点突破了摸顶价
+        buy_target     = None
+        sell_target    = None
+
+        if self._buy_target is not None and bar.low < self._buy_target:
+            buy_target = self._buy_target
+            self._buy_target = None   # 低点突破后立即清零
+            buy_triggered = True
+
+        if self._sell_target is not None and bar.high > self._sell_target:
+            sell_target = self._sell_target
+            self._sell_target = None  # 高点突破后立即清零
+            sell_triggered = True
+
+        # 第二步：若两个目标价在同一根K线内同时被突破，信号矛盾，均不开仓
+        if buy_triggered and sell_triggered:
+            logger.warning(
+                f"[{self.cfg.key}] 抄底价 {buy_target:.4f} 与摸顶价 {sell_target:.4f} "
+                f"在同一K线同时被突破（low={bar.low:.4f} high={bar.high:.4f} "
+                f"close={bar.close:.4f}），信号矛盾，两者均清零不开仓"
+            )
+            return
+
+        # 第三步：单独触发时，检查收盘价是否满足开仓条件
+        if buy_triggered:
+            if bar.close >= buy_target:
+                logger.info(
+                    f"[{self.cfg.key}] 抄底信号: low={bar.low:.4f} < {buy_target:.4f}, "
+                    f"close={bar.close:.4f} >= {buy_target:.4f} → 买入 {self._reversal_qty} 手"
+                )
+                _safe_ensure_future(
+                    self._execute_open("long", buy_target),
+                    label=f"{self.cfg.key} _execute_open(long)",
+                )
+            else:
+                logger.info(
+                    f"[{self.cfg.key}] 抄底价 {buy_target:.4f} 被突破，收盘 {bar.close:.4f} 未回 → 清零不开仓"
+                )
+
+        if sell_triggered:
+            if bar.close <= sell_target:
+                logger.info(
+                    f"[{self.cfg.key}] 摸顶信号: high={bar.high:.4f} > {sell_target:.4f}, "
+                    f"close={bar.close:.4f} <= {sell_target:.4f} → 卖出 {self._reversal_qty} 手"
+                )
+                _safe_ensure_future(
+                    self._execute_open("short", sell_target),
+                    label=f"{self.cfg.key} _execute_open(short)",
+                )
+            else:
+                logger.info(
+                    f"[{self.cfg.key}] 摸顶价 {sell_target:.4f} 被突破，收盘 {sell_target:.4f} 未回 → 清零不开仓"
+                )
+
+    async def _execute_open(self, direction: str, trigger_price: float) -> None:
+        """市价开仓（抄底/摸顶），双K止损启用时自动跟踪止损。"""
+        if self._position != 0:
+            logger.warning(f"[{self.cfg.key}] 抄底/摸顶开仓跳过：已有持仓 {self._position}")
+            return
+        label = "抄底" if direction == "long" else "摸顶"
+        try:
+            trade = self._ib.open_position(
+                contract=self.contract,
+                direction=direction,
+                qty=self._reversal_qty,
+                order_type="market",
+            )
+            logger.info(
+                f"[{self.cfg.key}] {label} 开仓指令已发送: {direction} {self._reversal_qty} 手 "
+                f"触发价={trigger_price:.4f} orderId={trade.order.orderId}"
+            )
+            if self._notifier:
+                side = "多" if direction == "long" else "空"
+                self._notifier.send(
+                    f"🎯 <b>{label}开仓</b>\n"
+                    f"合约: <code>{self.cfg.symbol}@{self.cfg.exchange}</code>\n"
+                    f"方向: {side}  手数: {self._reversal_qty}\n"
+                    f"触发价: {trigger_price:.4f}"
+                )
+        except Exception as e:
+            logger.error(f"[{self.cfg.key}] {label} 开仓异常: {e}")
 
     async def _execute_close(self, signal: Signal, reason: str = "") -> None:
         # Lock 确保即使多个协程同时被调度，平仓逻辑也绝对串行执行
@@ -248,6 +352,9 @@ class ContractMonitor:
             "k1": k1.to_dict() if k1 else None,
             "k2": k2.to_dict() if k2 else None,
             "bars_buffered": len(buf.completed),
+            "buy_target": self._buy_target,
+            "sell_target": self._sell_target,
+            "reversal_qty": self._reversal_qty,
         }
 
 
@@ -601,6 +708,36 @@ class TradingEngine:
         }
 
     # ── 参数热更新 ─────────────────────────────────────────────────────────
+
+    async def set_reversal_prices(
+        self,
+        key: str,
+        buy_target: Optional[float] = None,
+        sell_target: Optional[float] = None,
+        qty: Optional[float] = None,
+    ) -> dict:
+        """设置/清除指定合约的抄底/摸顶目标价。
+        传 0 表示清零，传正数表示设置，传 None 表示不变。
+        """
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if buy_target is not None:
+            monitor._buy_target = None if buy_target == 0 else buy_target
+        if sell_target is not None:
+            monitor._sell_target = None if sell_target == 0 else sell_target
+        if qty is not None and qty > 0:
+            monitor._reversal_qty = qty
+        logger.info(
+            f"[{key}] 抄底/摸顶目标价更新: buy={monitor._buy_target} "
+            f"sell={monitor._sell_target} qty={monitor._reversal_qty}"
+        )
+        return {
+            "success": True,
+            "buy_target": monitor._buy_target,
+            "sell_target": monitor._sell_target,
+            "reversal_qty": monitor._reversal_qty,
+        }
 
     async def update_strategy_params(
         self,

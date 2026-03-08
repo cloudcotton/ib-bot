@@ -207,6 +207,15 @@ function buildCard(c) {
     </div>`
     : `<div class="not-ready-hint">⏳ K 线缓冲区预热中（${c.bars_buffered}/2 根）</div>`;
 
+  // 抄底摸顶目标价行
+  let reversalHTML = '';
+  if (c.buy_target || c.sell_target) {
+    const buyPart  = c.buy_target  ? `<span class="reversal-buy">抄底 ${fmt(c.buy_target)}</span>`   : '';
+    const sellPart = c.sell_target ? `<span class="reversal-sell">摸顶 ${fmt(c.sell_target)}</span>` : '';
+    const qtyPart  = `<span class="reversal-qty">${c.reversal_qty} 手</span>`;
+    reversalHTML = `<div class="reversal-row">${buyPart}${sellPart}${qtyPart}</div>`;
+  }
+
   const sigOn = _lastStatus && _lastStatus.signal_enabled !== false;
   const sigText = sigOn ? (c.last_signal || '—') : '已暂停';
   const sigClass = !sigOn ? 'signal-paused' :
@@ -223,6 +232,7 @@ function buildCard(c) {
     </div>
     <div class="card-body">
       ${posInfoHTML}
+      ${reversalHTML}
       ${klineHTML}
       <div class="signal-row ${sigClass}">双K止损信号: ${sigText}${sigTime}</div>
     </div>`;
@@ -237,7 +247,7 @@ function klineCell(label, val, color, d = 2) {
 
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
 function syncSelects(contracts) {
-  ['trade-key', 'stop-key'].forEach(id => {
+  ['trade-key', 'stop-key', 'reversal-key'].forEach(id => {
     const sel = document.getElementById(id);
     const cur = sel.value;
     const opts = contracts.map(c => {
@@ -306,6 +316,32 @@ async function submitCancelStop() {
   if (!key) return showMsg('stop-msg', '请选择合约', false);
   const [symbol, exchange] = key.split('@');
   await apiCall('/api/trade/cancel_stop', { symbol, exchange }, 'stop-msg', '止损单已撤销');
+}
+
+// ── 抄底摸顶 ──────────────────────────────────────────────────────────────
+async function submitReversal() {
+  const key = document.getElementById('reversal-key').value;
+  if (!key) return showMsg('reversal-msg', '请选择合约', false);
+  const [symbol, exchange] = key.split('@');
+  const buy  = parseFloat(document.getElementById('reversal-buy').value);
+  const sell = parseFloat(document.getElementById('reversal-sell').value);
+  const qty  = parseFloat(document.getElementById('reversal-qty').value);
+  const body = { symbol, exchange };
+  if (!isNaN(buy)  && buy  > 0) body.buy_target  = buy;
+  if (!isNaN(sell) && sell > 0) body.sell_target = sell;
+  if (!isNaN(qty)  && qty  > 0) body.qty = qty;
+  if (!body.buy_target && !body.sell_target) return showMsg('reversal-msg', '请至少填写一个目标价', false);
+  const parts = [];
+  if (body.buy_target)  parts.push(`抄底@${buy}`);
+  if (body.sell_target) parts.push(`摸顶@${sell}`);
+  await apiCall('/api/params/reversal', body, 'reversal-msg', `已设置: ${parts.join(' / ')}`);
+}
+
+async function clearReversal() {
+  const key = document.getElementById('reversal-key').value;
+  if (!key) return showMsg('reversal-msg', '请选择合约', false);
+  const [symbol, exchange] = key.split('@');
+  await apiCall('/api/params/reversal', { symbol, exchange, buy_target: 0, sell_target: 0 }, 'reversal-msg', '抄底/摸顶目标价已清空');
 }
 
 // ── 策略参数 ──────────────────────────────────────────────────────────────
