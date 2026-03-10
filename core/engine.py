@@ -663,14 +663,50 @@ class TradingEngine:
             )
 
     def _on_ib_error(self, reqId: int, errorCode: int, errorString: str, contract) -> None:
-        """监听 IB 错误码，对关键错误做自动恢复。
+        """监听 IB 错误码，记录日志并对关键错误做自动恢复。
+
+        常见信息级错误码（非故障，可忽略）：
+          2104/2106/2158 — Market data farm connected/disconnected（正常连接状态变化）
+          2119           — Market data farm is connecting
+
+        常见 Tick 订阅错误码：
+          321  — Error validating request: subscription already in progress
+                 原因：程序重启时旧 clientId 的订阅在 IB 侧尚存活，
+                 新订阅请求被拒，该合约不再收到 tick 数据。
+                 处理：触发对该合约的重新订阅（cancelTickByTickData + re-subscribe）。
+          354  — Requested market data is not subscribed（缺少市场数据订阅权限）
+          10187 — Failed to request tick-by-tick data
 
         10182 — Failed to request live updates (disconnected)：
-            数据农场断开重连后，keepUpToDate K线推送流被服务端强制掐断。
-            引擎仍在线（_running=True），但所有合约实质上已"失聪"。
-            解决：立即触发 _resubscribe_all 重新拉取 K 线历史 + 恢复推送。
-            去重：用 _resubscribe_task 确保多个 10182 只触发一次重订阅。
+            数据农场断开重连后推送流被强制掐断，触发全量重订阅。
         """
+        # 信息级状态通知（无需处理）
+        _INFO_CODES = {2104, 2106, 2107, 2108, 2119, 2158}
+        if errorCode in _INFO_CODES:
+            logger.debug(f"IB 状态通知 ({errorCode}): {errorString}")
+            return
+
+        # 记录所有非信息级错误，方便排查（如 tick 订阅失败）
+        symbol = contract.symbol if contract else "—"
+        logger.warning(
+            f"IB 错误 reqId={reqId} code={errorCode} contract={symbol}: {errorString}"
+        )
+
+        # 321: Tick 订阅被 IB 拒绝（旧订阅残留），对该合约触发重新订阅
+        if errorCode == 321 and self._running and not self._stopping:
+            for key, monitor in self._monitors.items():
+                if (monitor.ticker is not None
+                        and hasattr(monitor.ticker, 'reqId')
+                        and monitor.ticker.reqId == reqId):
+                    logger.warning(
+                        f"[{key}] Tick 订阅被拒（321），1 秒后重新订阅…"
+                    )
+                    _safe_ensure_future(
+                        self._resubscribe_one(key), label=f"{key} resubscribe(321)"
+                    )
+                    break
+
+        # 10182: 数据农场断线，全量重订阅
         if errorCode == 10182 and self._running and not self._stopping:
             if self._resubscribe_task is None or self._resubscribe_task.done():
                 logger.warning(
@@ -753,6 +789,30 @@ class TradingEngine:
                 logger.info(f"重新订阅成功（逐Tick）: {key}")
             except Exception as e:
                 logger.error(f"重新订阅失败 {key}: {e}")
+
+    async def _resubscribe_one(self, key: str) -> None:
+        """对单个合约重新订阅 Tick（用于 321 错误恢复）。"""
+        await asyncio.sleep(1)   # 稍等片刻，让 IB 侧旧订阅超时
+        monitor = self._monitors.get(key)
+        if monitor is None or not self._running:
+            return
+        # 取消旧订阅
+        if monitor.ticker is not None:
+            try:
+                self.ib_client.cancel_ticks(monitor.ticker, monitor._tick_callback)
+            except Exception:
+                pass
+            monitor.ticker = None
+        # 重新订阅
+        try:
+            monitor._tick_callback = monitor.on_ticker_update
+            ticker = self.ib_client.subscribe_ticks(
+                contract=monitor.contract, callback=monitor._tick_callback,
+            )
+            monitor.ticker = ticker
+            logger.info(f"[{key}] Tick 重新订阅成功")
+        except Exception as e:
+            logger.error(f"[{key}] Tick 重新订阅失败: {e}")
 
     # ── 持仓变动回调 ───────────────────────────────────────────────────────
 

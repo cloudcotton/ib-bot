@@ -193,9 +193,18 @@ class IBClient:
         callback 签名：callback(ticker) → None
             在回调内通过 ticker.tickByTicks 遍历当批 tick。
 
+        订阅前先发送一次 cancelTickByTickData，清除 IB 侧可能残留的旧订阅
+        （程序异常重启后同一 clientId 的旧 Tick 流不会自动失效，
+        直接 re-subscribe 会触发 IB 错误 321 导致新订阅无数据）。
+
         返回 Ticker 对象，用于后续取消订阅。
         """
         logger.info(f"订阅逐Tick: {contract.symbol}@{contract.exchange}")
+        # 先尝试撤销残留订阅，失败则忽略（初次订阅时不存在旧订阅，会抛异常）
+        try:
+            self.ib.cancelTickByTickData(contract, "Last")
+        except Exception:
+            pass
         ticker = self.ib.reqTickByTickData(contract, "Last", 0, False)
         ticker.updateEvent += callback
         return ticker
