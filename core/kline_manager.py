@@ -16,8 +16,8 @@ EMA20（20 周期指数移动平均）：
   - 未满 20 根时 ema20 为 None（不可用）
 
 信号触发条件（双K止损）：
-  平多: current.close ≤ current.low  AND  current.close < min(K-1.low, K-2.low)
-  平空: current.close ≥ current.high AND  current.close > max(K-1.high, K-2.high)
+  平多: current.low  < min(K-1.low,  K-2.low)
+  平空: current.high > max(K-1.high, K-2.high)
 """
 
 from __future__ import annotations
