@@ -431,6 +431,36 @@ class TradingEngine:
         await self.ib_client.disconnect()
         logger.info("引擎已停止")
 
+    # ── 历史 K 线加载（内部辅助）──────────────────────────────────────────
+
+    @staticmethod
+    def _fill_buffer_from_history(buffer: KlineBuffer, hist: list) -> None:
+        """将历史 K 线装入缓冲区。
+
+        IB 返回的最后一根 K 线是当前正在成形的 K 线（partial bar），
+        它尚未完成，不能放入 buffer.completed，否则会导致 K-1/K-2 显示偏移。
+        正确做法：
+          - hist[:-1] → buffer.completed（已完成 K 线，供 K-1/K-2 计算）
+          - hist[-1]  → buffer.current（当前 K 线的历史种子，让 ready 立即为 True）
+
+        TickBarBuilder 收到首个 Tick 时会覆盖 buffer.current，
+        历史种子仅起到"填充 ready 状态"和"保留已知极值"的作用。
+        """
+        if not hist:
+            return
+        # 已完成 K 线：排除最后一根（partial），最多取 24 根（EMA20 需 20 根种子）
+        for b in hist[:-1][-24:]:
+            buffer.add_completed(Bar(
+                time=str(b.date), open=float(b.open), high=float(b.high),
+                low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+            ))
+        # 当前 K 线：用最后一根历史 K 线作为种子，确保 ready 在首 Tick 到达前即为 True
+        b = hist[-1]
+        buffer.update_current(Bar(
+            time=str(b.date), open=float(b.open), high=float(b.high),
+            low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+        ))
+
     # ── 合约初始化 ─────────────────────────────────────────────────────────
 
     async def _init_monitor(self, cfg: ContractConfig) -> None:
@@ -453,20 +483,16 @@ class TradingEngine:
         avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
         monitor.update_position(qty, avg_cost)
 
-        # ── 拉取历史 K 线，初始化 K-1/K-2 缓冲区 ──
+        # ── 拉取历史 K 线，初始化缓冲区 ──
         try:
             hist = await self.ib_client.fetch_historical_bars(
                 contract=ib_contract, timeframe=cfg.timeframe, use_rth=cfg.use_rth,
             )
-            for b in hist[-24:]:    # 最多 24 根（EMA20 需要 20 根种子）
-                monitor.buffer.add_completed(Bar(
-                    time=str(b.date), open=float(b.open), high=float(b.high),
-                    low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                ))
+            self._fill_buffer_from_history(monitor.buffer, hist)
             logger.info(
                 f"[{cfg.key}] 历史K线预热完成"
-                f"（{len(monitor.buffer.completed)} 根，ready={monitor.buffer.ready}"
-                f"，ema20={monitor.buffer.ema20}）"
+                f"（已完成 {len(monitor.buffer.completed)} 根，"
+                f"ready={monitor.buffer.ready}，ema20={monitor.buffer.ema20}）"
             )
         except Exception as e:
             logger.error(f"[{cfg.key}] 历史K线拉取失败，将在首批Tick到来后逐步建立缓冲: {e}")
@@ -705,11 +731,7 @@ class TradingEngine:
                     timeframe=monitor.cfg.timeframe,
                     use_rth=monitor.cfg.use_rth,
                 )
-                for b in hist[-24:]:
-                    monitor.buffer.add_completed(Bar(
-                        time=str(b.date), open=float(b.open), high=float(b.high),
-                        low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                    ))
+                self._fill_buffer_from_history(monitor.buffer, hist)
 
                 # 重建 Tick 合成器
                 monitor._tick_builder = TickBarBuilder(
