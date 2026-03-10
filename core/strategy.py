@@ -4,14 +4,18 @@
   平多信号: Kn 运行低点 < min(K-1.low, K-2.low)
   平空信号: Kn 运行高点 > max(K-1.high, K-2.high)
 
-判断依据是当前 K 线的运行极值（low/high），而非 close：
-  - IB 的 bar 更新是批量的，close 是批次内最后一笔价格。
-    若价格在批次内短暂突破止损阈值后回升，close > low，
-    用 close 检测会漏掉这次突破。
-  - kn.low 记录的是 K 线开始至今的最低价，一旦价格触及过
-    阈值以下，kn.low 就会永久反映这一事实，直到 K 线收盘。
-  - 因此只需检测 kn.low < min(K-1.low, K-2.low) 即可，
-    无需同时要求 close == low。
+判断逻辑（逐Tick检测，先检查后更新）：
+  每笔 Tick 到达后，在 Kn.low/Kn.high 被更新之前先做比较：
+    平多: tick_price < min(Kn.low_before, K-1.low, K-2.low)
+    平空: tick_price > max(Kn.high_before, K-1.high, K-2.high)
+
+  "先检查后更新"的含义：
+    - Kn.low_before 是当前 K 线本 tick 之前的运行最低价
+    - 只有当新 tick 真正突破"所有已知最低点"时才触发止损
+    - 若价格曾经创新低后回升，回升过程中的 tick 不会再次触发：
+        因为 Kn.low_before 已更新为历史最低，后续 tick > Kn.low_before
+    - 抄底场景：K-1（抄底那根K线）的 low 就是阈值底线，
+        开仓后只要价格不跌破该 low 就不触发——无需特判"开仓K线"
 """
 
 from __future__ import annotations
@@ -30,16 +34,17 @@ class Signal(str, Enum):
 def check_signal(
     buffer: KlineBuffer,
     position: float,
-    entry_bar_time: Optional[str] = None,
+    tick_price: float,
 ) -> Optional[Signal]:
-    """基于当前缓冲区和持仓方向，返回止损信号或 None。
+    """基于当前缓冲区、持仓方向和当前 tick 价格，返回止损信号或 None。
+
+    必须在 TickBarBuilder.on_tick() 更新 Kn.low/Kn.high 之前调用，
+    确保 buffer.current.low / high 反映的是本 tick 之前的极值。
 
     Args:
-        buffer:         合约的 K 线缓冲区
-        position:       持仓数量（>0 多头，<0 空头，0 平仓）
-        entry_bar_time: 开仓时所在 K 线的 time 字段。
-                        开仓当根 K 线用 close 判断，避免开仓前已存在的极值误触发；
-                        后续 K 线用 kn.low/kn.high 判断，能捕获批次内短暂突破。
+        buffer:     合约的 K 线缓冲区
+        position:   持仓数量（>0 多头，<0 空头，0 无仓）
+        tick_price: 当前 tick 成交价（即将成为新的 Kn.close）
 
     Returns:
         Signal.CLOSE_LONG / CLOSE_SHORT，或 None
@@ -53,19 +58,12 @@ def check_signal(
 
     kn, k1, k2 = data
 
-    # 开仓当根 K 线：kn.low/kn.high 包含开仓前的价格运动，不能用来触发止损；
-    # 改用 kn.close（当前价）比较，避免追溯开仓前历史极值。
-    # 后续 K 线：kn.low/kn.high 只反映开仓后的行情，可直接与阈值比较。
-    is_entry_bar = (entry_bar_time is not None and kn.time == entry_bar_time)
-
     if position > 0:  # 多头 → 监控平多信号
-        ref = kn.close if is_entry_bar else kn.low
-        if ref < min(k1.low, k2.low):
+        if tick_price < min(kn.low, k1.low, k2.low):
             return Signal.CLOSE_LONG
 
     elif position < 0:  # 空头 → 监控平空信号
-        ref = kn.close if is_entry_bar else kn.high
-        if ref > max(k1.high, k2.high):
+        if tick_price > max(kn.high, k1.high, k2.high):
             return Signal.CLOSE_SHORT
 
     return None

@@ -84,10 +84,6 @@ class ContractMonitor:
         self._last_signal_time: dict[str, datetime] = {}
         self._last_signal: Optional[str] = None
 
-        # 开仓当根 K 线时间戳：用于区分"开仓前历史极值"与"开仓后新极值"
-        # 开仓当根 K 线用 close 触发止损；后续 K 线用 kn.low/kn.high 触发
-        self._entry_bar_time: Optional[str] = None
-
         # 抄底摸顶目标价（None 表示未设置）
         self._buy_target: Optional[float] = None   # 抄底价：低点触及后收盘回升则买入
         self._sell_target: Optional[float] = None  # 摸顶价：高点触及后收盘回落则卖出
@@ -103,17 +99,9 @@ class ContractMonitor:
             # 乘数取自静态配置，避免 IB 接口瞬时返回异常导致均价失真
             mult = self.cfg.multiplier or 1.0
             self._entry_price = avg_cost / mult
-            # 新开仓（从无仓到有仓）：记录开仓时所在 K 线，避免该 K 线已有的
-            # 历史极值（开仓前发生）被误判为止损信号
-            if old == 0:
-                self._entry_bar_time = (
-                    self.buffer.current.time if self.buffer.current else None
-                )
-                logger.debug(f"[{self.cfg.key}] 开仓K线时间: {self._entry_bar_time}")
         elif qty == 0:
             self._entry_price = None
             self._stop_price = None
-            self._entry_bar_time = None
             if self._stop_trade is not None:
                 # 持仓归零（IB 强平或保证金不足触发），主动撤销残留止损单。
                 # 若止损单尚未触发，孤立订单可能在后续行情中意外反向开仓。
@@ -143,6 +131,8 @@ class ContractMonitor:
             size = float(t.size)
             if price <= 0:
                 continue
+            # 先检测止损（Kn.low/Kn.high 尚未被当前 tick 更新）
+            self._check_and_fire(price)
             try:
                 has_new_bar = self._tick_builder.on_tick(price, size, t.time)
             except Exception as e:
@@ -151,14 +141,12 @@ class ContractMonitor:
             # K 线收盘时检查抄底/摸顶开仓信号
             if has_new_bar and self.buffer.completed:
                 self._check_reversal_entry(self.buffer.completed[-1])
-            # 每 tick 都检测止损信号
-            self._check_and_fire()
 
-    def _check_and_fire(self) -> None:
-        """双K止损检测（辅助退出信号）。"""
+    def _check_and_fire(self, tick_price: float) -> None:
+        """双K止损检测（辅助退出信号）。须在 on_tick() 更新极值前调用。"""
         if not self._signal_enabled:
             return
-        signal = check_signal(self.buffer, self._position, self._entry_bar_time)
+        signal = check_signal(self.buffer, self._position, tick_price)
         if signal is None:
             return
         now = datetime.now()
