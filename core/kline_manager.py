@@ -24,7 +24,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
+
+# ── 周期秒数映射 ─────────────────────────────────────────────────────────────
+# 供 TickBarBuilder 进行时间边界对齐
+
+_PERIOD_SECONDS: dict[str, int] = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
+}
 
 _EMA_PERIOD = 20
 _EMA_K = 2.0 / (_EMA_PERIOD + 1)   # EMA 平滑系数 ≈ 0.0952
@@ -101,6 +110,91 @@ class KlineBuffer:
             return None
         k2, k1 = self.completed[-2], self.completed[-1]
         return self.current, k1, k2
+
+
+class TickBarBuilder:
+    """将逐 Tick 成交数据聚合为固定周期 K 线，实时写入 KlineBuffer。
+
+    时间边界对齐采用 UTC epoch 整除，与时区无关：
+        bar_start = floor(tick.timestamp / period_seconds) * period_seconds
+
+    每次 on_tick() 调用会：
+      1. 更新 buffer.current（close / high / low / volume）
+      2. 若穿越 K 线边界，先将旧 current 推入 buffer.completed，再开新 K 线
+
+    bar.time 格式统一为 "YYYY-MM-DD HH:MM:SS UTC"，与历史 K 线（本地时间）
+    格式不同，但 entry_bar_time 比较仅在 tick-bar 之间进行，互不影响。
+    """
+
+    def __init__(self, timeframe: str, buffer: KlineBuffer) -> None:
+        self._period = _PERIOD_SECONDS.get(timeframe, 300)
+        self._buf = buffer
+        self._bar_epoch: Optional[int] = None   # 当前 K 线的对齐 epoch（秒）
+
+    @staticmethod
+    def _bar_time_str(epoch: int) -> str:
+        """将 epoch 转为 K 线时间字符串（UTC）。"""
+        dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    def on_tick(self, price: float, size: float, ts: datetime) -> bool:
+        """处理一笔成交 Tick。
+
+        Args:
+            price: 成交价
+            size:  成交量
+            ts:    成交时间（ib_insync 传入的 UTC aware datetime）
+
+        Returns:
+            True  = 本 tick 触发了 K 线收盘（has_new_bar）
+            False = 普通 tick，当前 K 线内更新
+        """
+        epoch = int(ts.timestamp())
+        bar_epoch = (epoch // self._period) * self._period
+        has_new_bar = False
+
+        if self._bar_epoch is None:
+            # 首个 tick：开启当前 K 线
+            self._bar_epoch = bar_epoch
+            self._buf.update_current(Bar(
+                time=self._bar_time_str(bar_epoch),
+                open=price, high=price, low=price, close=price, volume=size,
+            ))
+
+        elif bar_epoch > self._bar_epoch:
+            # 穿越 K 线边界：关闭旧 K 线，开启新 K 线
+            if self._buf.current is not None:
+                self._buf.add_completed(self._buf.current)
+                has_new_bar = True
+            self._bar_epoch = bar_epoch
+            self._buf.update_current(Bar(
+                time=self._bar_time_str(bar_epoch),
+                open=price, high=price, low=price, close=price, volume=size,
+            ))
+
+        else:
+            # 同一根 K 线内：更新极值与收盘
+            cur = self._buf.current
+            if cur is not None:
+                self._buf.update_current(Bar(
+                    time=cur.time, open=cur.open,
+                    high=max(cur.high, price),
+                    low=min(cur.low, price),
+                    close=price,
+                    volume=cur.volume + size,
+                ))
+            else:
+                # 缓冲区被 reset 后还未有 current，重新初始化
+                self._buf.update_current(Bar(
+                    time=self._bar_time_str(bar_epoch),
+                    open=price, high=price, low=price, close=price, volume=size,
+                ))
+
+        return has_new_bar
+
+    def reset(self) -> None:
+        """断线重连后重置，下一个 tick 将重新初始化当前 K 线。"""
+        self._bar_epoch = None
 
 
 class KlineManager:

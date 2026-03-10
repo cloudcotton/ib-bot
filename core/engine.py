@@ -20,7 +20,7 @@ from typing import Optional
 
 from adapters.ib_client import IBClient
 from core.equity_recorder import EquityRecorder
-from core.kline_manager import Bar, KlineBuffer
+from core.kline_manager import Bar, KlineBuffer, TickBarBuilder, _PERIOD_SECONDS
 from core.notifier import TelegramNotifier
 from core.settings import ContractConfig, Settings, save_settings
 from core.strategy import Signal, check_signal
@@ -64,7 +64,9 @@ class ContractMonitor:
         self._cooldown = cooldown_sec
 
         self.buffer = KlineBuffer()
-        self.bars = None
+        self.ticker = None                  # ib_insync Ticker（逐Tick订阅）
+        self._tick_builder: Optional[TickBarBuilder] = None
+        self._tick_callback: Optional[object] = None   # 注册到 updateEvent 的引用
         self._initialized: bool = False     # 历史K线是否已预热
         self._signal_enabled: bool = True   # 双K止损信号开关
 
@@ -123,50 +125,34 @@ class ContractMonitor:
         if old != qty:
             logger.info(f"[{self.cfg.key}] 持仓: {old} → {qty}  均价={avg_cost:.4f}")
 
-    # ── K 线更新回调 ───────────────────────────────────────────────────────
+    # ── 逐 Tick 回调 ──────────────────────────────────────────────────────
 
-    def on_bars_update(self, bars, has_new_bar: bool) -> None:
-        if not bars:
+    def on_ticker_update(self, ticker) -> None:
+        """ticker.updateEvent 回调：处理本批次所有新成交 Tick。
+
+        ib_insync 在每个 TCP 数据包处理完后触发一次此回调，
+        ticker.tickByTicks 包含该批次内所有新到的 TickByTickAllLast。
+        """
+        if not self._initialized or self._tick_builder is None:
             return
-        try:
-            if not self._initialized:
-                # 首次回调：bars 包含完整历史数据
-                # bars[-1] = 当前未完成K线，bars[:-1] = 已完成K线列表
-                self._initialized = True
-                completed = list(bars[:-1])
-                for b in completed[-24:]:   # 取最多24根预热（EMA20 需要 20 根种子）
-                    self.buffer.add_completed(Bar(
-                        time=str(b.date), open=float(b.open), high=float(b.high),
-                        low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                    ))
-                b = bars[-1]
-                self.buffer.update_current(Bar(
-                    time=str(b.date), open=float(b.open), high=float(b.high),
-                    low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                ))
-                logger.info(
-                    f"[{self.cfg.key}] K线缓冲区预热完成"
-                    f"（历史 {len(self.buffer.completed)} 根，ready={self.buffer.ready}"
-                    f"，ema20={self.buffer.ema20}）"
-                )
-            else:
-                if has_new_bar and len(bars) >= 2:
-                    b = bars[-2]
-                    completed = Bar(
-                        time=str(b.date), open=float(b.open), high=float(b.high),
-                        low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                    )
-                    self.buffer.add_completed(completed)
-                    self._check_reversal_entry(completed)  # K线收盘时检查抄底/摸顶
-                b = bars[-1]
-                self.buffer.update_current(Bar(
-                    time=str(b.date), open=float(b.open), high=float(b.high),
-                    low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
-                ))
-        except Exception as e:
-            logger.error(f"[{self.cfg.key}] K 线更新异常: {e}")
+        ticks = ticker.tickByTicks
+        if not ticks:
             return
-        self._check_and_fire()
+        for t in ticks:
+            price = float(t.price)
+            size = float(t.size)
+            if price <= 0:
+                continue
+            try:
+                has_new_bar = self._tick_builder.on_tick(price, size, t.time)
+            except Exception as e:
+                logger.error(f"[{self.cfg.key}] Tick 处理异常: {e}")
+                continue
+            # K 线收盘时检查抄底/摸顶开仓信号
+            if has_new_bar and self.buffer.completed:
+                self._check_reversal_entry(self.buffer.completed[-1])
+            # 每 tick 都检测止损信号
+            self._check_and_fire()
 
     def _check_and_fire(self) -> None:
         """双K止损检测（辅助退出信号）。"""
@@ -437,9 +423,9 @@ class TradingEngine:
             except asyncio.CancelledError:
                 pass
         for monitor in self._monitors.values():
-            if monitor.bars is not None:
+            if monitor.ticker is not None:
                 try:
-                    self.ib_client.cancel_bars(monitor.bars)
+                    self.ib_client.cancel_ticks(monitor.ticker, monitor._tick_callback)
                 except Exception:
                     pass
         await self.ib_client.disconnect()
@@ -467,13 +453,37 @@ class TradingEngine:
         avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
         monitor.update_position(qty, avg_cost)
 
-        bars = await self.ib_client.subscribe_bars(
-            contract=ib_contract, timeframe=cfg.timeframe,
-            use_rth=cfg.use_rth, callback=monitor.on_bars_update,
+        # ── 拉取历史 K 线，初始化 K-1/K-2 缓冲区 ──
+        try:
+            hist = await self.ib_client.fetch_historical_bars(
+                contract=ib_contract, timeframe=cfg.timeframe, use_rth=cfg.use_rth,
+            )
+            for b in hist[-24:]:    # 最多 24 根（EMA20 需要 20 根种子）
+                monitor.buffer.add_completed(Bar(
+                    time=str(b.date), open=float(b.open), high=float(b.high),
+                    low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+                ))
+            logger.info(
+                f"[{cfg.key}] 历史K线预热完成"
+                f"（{len(monitor.buffer.completed)} 根，ready={monitor.buffer.ready}"
+                f"，ema20={monitor.buffer.ema20}）"
+            )
+        except Exception as e:
+            logger.error(f"[{cfg.key}] 历史K线拉取失败，将在首批Tick到来后逐步建立缓冲: {e}")
+
+        # ── 创建 Tick 合成器并订阅实时成交流 ──
+        monitor._tick_builder = TickBarBuilder(
+            timeframe=cfg.timeframe, buffer=monitor.buffer,
         )
-        monitor.bars = bars
+        monitor._initialized = True
+
+        monitor._tick_callback = monitor.on_ticker_update
+        ticker = self.ib_client.subscribe_ticks(
+            contract=ib_contract, callback=monitor._tick_callback,
+        )
+        monitor.ticker = ticker
         self._monitors[cfg.key] = monitor
-        logger.info(f"合约监控已启动: {cfg.key} conId={ib_contract.conId}")
+        logger.info(f"合约监控已启动（逐Tick模式）: {cfg.key} conId={ib_contract.conId}")
 
     # ── 开仓 ───────────────────────────────────────────────────────────────
 
@@ -673,24 +683,52 @@ class TradingEngine:
     async def _resubscribe_all(self) -> None:
         await self.ib_client._fetch_initial_positions()
         for key, monitor in self._monitors.items():
-            if monitor.bars is not None:
+            # 取消旧 Tick 订阅
+            if monitor.ticker is not None:
                 try:
-                    self.ib_client.cancel_bars(monitor.bars)
+                    self.ib_client.cancel_ticks(monitor.ticker, monitor._tick_callback)
                 except Exception:
                     pass
-                monitor.bars = None
+                monitor.ticker = None
+                monitor._tick_callback = None
+
+            # 清空 K 线缓冲与 Tick 合成器
             monitor.buffer.reset()
             monitor._initialized = False
+            if monitor._tick_builder is not None:
+                monitor._tick_builder.reset()
+
             try:
-                bars = await self.ib_client.subscribe_bars(
-                    contract=monitor.contract, timeframe=monitor.cfg.timeframe,
-                    use_rth=monitor.cfg.use_rth, callback=monitor.on_bars_update,
+                # 重拉历史 K 线
+                hist = await self.ib_client.fetch_historical_bars(
+                    contract=monitor.contract,
+                    timeframe=monitor.cfg.timeframe,
+                    use_rth=monitor.cfg.use_rth,
                 )
-                monitor.bars = bars
+                for b in hist[-24:]:
+                    monitor.buffer.add_completed(Bar(
+                        time=str(b.date), open=float(b.open), high=float(b.high),
+                        low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
+                    ))
+
+                # 重建 Tick 合成器
+                monitor._tick_builder = TickBarBuilder(
+                    timeframe=monitor.cfg.timeframe, buffer=monitor.buffer,
+                )
+                monitor._initialized = True
+
+                # 重新订阅 Tick
+                monitor._tick_callback = monitor.on_ticker_update
+                ticker = self.ib_client.subscribe_ticks(
+                    contract=monitor.contract, callback=monitor._tick_callback,
+                )
+                monitor.ticker = ticker
+
+                # 刷新持仓状态
                 qty = self.ib_client.get_position(monitor.contract.conId)
                 avg_cost = self.ib_client.get_avg_cost(monitor.contract.conId)
                 monitor.update_position(qty, avg_cost)
-                logger.info(f"重新订阅成功: {key}")
+                logger.info(f"重新订阅成功（逐Tick）: {key}")
             except Exception as e:
                 logger.error(f"重新订阅失败 {key}: {e}")
 

@@ -3,7 +3,8 @@
 职责：
   - 连接 / 断开 TWS / IB Gateway
   - 合约自动寻找近月（reqContractDetails）
-  - 订阅历史 K 线 + 实时更新（keepUpToDate=True）
+  - 一次性拉取历史 K 线（用于初始化 K-1/K-2 缓冲区）
+  - 订阅逐 Tick 成交数据（reqTickByTickData）用于实时止损检测
   - 查询 / 订阅持仓变动（含均价）
   - 开仓（市价 / 限价）、止损单、撤单、平仓
 """
@@ -16,7 +17,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from ib_insync import (
-    IB, BarDataList, Future, LimitOrder, MarketOrder,
+    IB, Future, LimitOrder, MarketOrder,
     Position, StopOrder, util,
 )
 
@@ -149,19 +150,25 @@ class IBClient:
         logger.info(f"近月合约: {symbol}@{exchange} → 到期={contract.lastTradeDateOrContractMonth}")
         return contract
 
-    # ── K 线订阅 ──────────────────────────────────────────────────────────
+    # ── K 线历史拉取（一次性）──────────────────────────────────────────────
 
-    async def subscribe_bars(
+    async def fetch_historical_bars(
         self,
         contract,
         timeframe: str,
         use_rth: bool,
-        callback: Callable[[BarDataList, bool], None],
-    ) -> BarDataList:
+    ) -> list:
+        """拉取历史已完成 K 线，用于初始化 K-1/K-2 缓冲区。
+
+        使用 keepUpToDate=False：只返回历史数据，不持续推送更新。
+        返回 BarData 列表，调用方自行按需截取所需根数。
+        """
         bar_size = _BAR_SIZE.get(timeframe, "5 mins")
         duration = _DURATION.get(timeframe, "2 D")
-        logger.info(f"订阅 K 线: {contract.symbol} {bar_size} duration={duration} useRTH={use_rth}")
-        # reqHistoricalData 同步版会阻塞事件循环，改用 async 版本
+        logger.info(
+            f"拉取历史K线: {contract.symbol} {bar_size} "
+            f"duration={duration} useRTH={use_rth}"
+        )
         bars = await self.ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
@@ -170,13 +177,43 @@ class IBClient:
             whatToShow="TRADES",
             useRTH=use_rth,
             formatDate=1,
-            keepUpToDate=True,
+            keepUpToDate=False,
         )
-        bars.updateEvent += callback
-        return bars
+        return list(bars)
 
-    def cancel_bars(self, bars: BarDataList) -> None:
-        self.ib.cancelHistoricalData(bars)
+    # ── 逐 Tick 实时订阅 ──────────────────────────────────────────────────
+
+    def subscribe_ticks(self, contract, callback: Callable) -> object:
+        """订阅逐 Tick 成交数据（reqTickByTickData 'Last'）。
+
+        IB 每收到新成交即推送；ib_insync 将同批次 tick 积攒到
+        ticker.tickByTicks，并在 tcpDataProcessed 后触发
+        ticker.updateEvent(ticker)。
+
+        callback 签名：callback(ticker) → None
+            在回调内通过 ticker.tickByTicks 遍历当批 tick。
+
+        返回 Ticker 对象，用于后续取消订阅。
+        """
+        logger.info(f"订阅逐Tick: {contract.symbol}@{contract.exchange}")
+        ticker = self.ib.reqTickByTickData(contract, "Last", 0, False)
+        ticker.updateEvent += callback
+        return ticker
+
+    def cancel_ticks(self, ticker, callback: Optional[Callable] = None) -> None:
+        """取消逐 Tick 订阅。"""
+        if ticker is None:
+            return
+        try:
+            if callback is not None:
+                try:
+                    ticker.updateEvent -= callback
+                except Exception:
+                    pass
+            self.ib.cancelTickByTickData(ticker.contract, "Last")
+            logger.info(f"已取消Tick订阅: {ticker.contract.symbol}")
+        except Exception as e:
+            logger.warning(f"取消Tick订阅失败: {e}")
 
     # ── 持仓管理 ──────────────────────────────────────────────────────────
 
