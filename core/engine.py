@@ -742,28 +742,6 @@ class TradingEngine:
 
     # ── 止盈价管理 ─────────────────────────────────────────────────────────
 
-    async def set_take_profit(self, key: str, take_profit_price: float) -> dict:
-        """为当前持仓设置或修改止盈价（重新挂 IB 限价止盈单）。"""
-        monitor = self._monitors.get(key)
-        if not monitor:
-            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
-        if monitor._position == 0:
-            return {"success": False, "error": "当前无持仓"}
-
-        direction = "long" if monitor._position > 0 else "short"
-        qty = abs(monitor._position)
-
-        await self._submit_take_profit(monitor, direction, qty, take_profit_price)
-        return {"success": True, "take_profit_price": take_profit_price}
-
-    async def cancel_take_profit(self, key: str) -> dict:
-        """撤销当前止盈单。"""
-        monitor = self._monitors.get(key)
-        if not monitor:
-            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
-        await monitor._cancel_tp_order()
-        return {"success": True}
-
     # ── 手动平仓 ───────────────────────────────────────────────────────────
 
     async def manual_close(

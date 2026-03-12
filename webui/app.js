@@ -299,7 +299,7 @@ function syncCardControlValues(card, c) {
 
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
 function syncSelects(contracts) {
-  ['trade-key', 'stop-key', 'tp-key'].forEach(id => {
+  ['trade-key', 'stop-key'].forEach(id => {
     const sel = document.getElementById(id);
     const cur = sel.value;
     const opts = contracts.map(c => {
@@ -383,23 +383,6 @@ async function submitCancelStop(side) {
   const [symbol, exchange] = key.split('@');
   const label = side === 'long' ? '多头' : side === 'short' ? '空头' : '全部';
   await apiCall('/api/trade/cancel_stop', { symbol, exchange, side }, 'stop-msg', `${label}静态止损已撤销`);
-}
-
-// ── 止盈设置 ──────────────────────────────────────────────────────────────
-async function submitSetTp() {
-  const key = document.getElementById('tp-key').value;
-  if (!key) return showMsg('tp-msg', '请选择合约', false);
-  const tp = parseFloat(document.getElementById('tp-price').value);
-  if (!tp) return showMsg('tp-msg', '请填写止盈价', false);
-  const [symbol, exchange] = key.split('@');
-  await apiCall('/api/trade/set_tp', { symbol, exchange, take_profit_price: tp }, 'tp-msg', `止盈价已设置: ${tp}`);
-}
-
-async function submitCancelTp() {
-  const key = document.getElementById('tp-key').value;
-  if (!key) return showMsg('tp-msg', '请选择合约', false);
-  const [symbol, exchange] = key.split('@');
-  await apiCall('/api/trade/cancel_tp', { symbol, exchange }, 'tp-msg', '止盈单已撤销');
 }
 
 // ── 抄底摸顶（卡片内联操作）────────────────────────────────────────────

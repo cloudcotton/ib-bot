@@ -8,13 +8,11 @@ from fastapi import APIRouter, HTTPException, Request
 
 from web.schemas import (
     CancelStaticStopRequest,
-    CancelTakeProfitRequest,
     HealthResponse,
     ManualCloseRequest,
     OpenPositionRequest,
     SetReversalRequest,
     SetStaticStopRequest,
-    SetTakeProfitRequest,
     UpdateNotifyRequest,
     UpdateStrategyRequest,
 )
@@ -106,31 +104,6 @@ async def cancel_stop(body: CancelStaticStopRequest, request: Request):
     result = await e.cancel_static_stop(key, side=body.side)
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "撤止损失败"))
-    return result
-
-
-# ── 止盈管理 ──────────────────────────────────────────────────────────────
-
-
-@router.post("/trade/set_tp")
-async def set_take_profit(body: SetTakeProfitRequest, request: Request):
-    """为当前持仓设置或修改止盈价（重新挂 IB 限价止盈单）。"""
-    e = _engine(request)
-    key = f"{body.symbol}@{body.exchange}"
-    result = await e.set_take_profit(key, body.take_profit_price)
-    if not result.get("success"):
-        raise HTTPException(400, result.get("error", "设置止盈失败"))
-    return result
-
-
-@router.post("/trade/cancel_tp")
-async def cancel_take_profit(body: CancelTakeProfitRequest, request: Request):
-    """撤销当前止盈单（不平仓）。"""
-    e = _engine(request)
-    key = f"{body.symbol}@{body.exchange}"
-    result = await e.cancel_take_profit(key)
-    if not result.get("success"):
-        raise HTTPException(400, result.get("error", "撤止盈失败"))
     return result
 
 

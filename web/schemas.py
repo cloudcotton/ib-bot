@@ -42,16 +42,6 @@ class CancelStaticStopRequest(BaseModel):
     side: str = "both"   # "long" | "short" | "both"
 
 
-class SetTakeProfitRequest(BaseModel):
-    symbol: str
-    exchange: str
-    take_profit_price: float
-
-
-class CancelTakeProfitRequest(BaseModel):
-    symbol: str
-    exchange: str
-
 
 class UpdateStrategyRequest(BaseModel):
     signal_cooldown_sec: Optional[int] = None
