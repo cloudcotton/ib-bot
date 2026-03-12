@@ -19,6 +19,7 @@ class OpenPositionRequest(BaseModel):
     order_type: str = "market"   # "market" | "limit"
     limit_price: Optional[float] = None
     stop_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
 
 
 class ManualCloseRequest(BaseModel):
@@ -28,13 +29,26 @@ class ManualCloseRequest(BaseModel):
     limit_price: Optional[float] = None
 
 
-class SetStopRequest(BaseModel):
+class SetStaticStopRequest(BaseModel):
     symbol: str
     exchange: str
-    stop_price: float
+    long_stop: Optional[float] = None    # None=不变, 0=清除, >0=设置多头止损
+    short_stop: Optional[float] = None   # None=不变, 0=清除, >0=设置空头止损
 
 
-class CancelStopRequest(BaseModel):
+class CancelStaticStopRequest(BaseModel):
+    symbol: str
+    exchange: str
+    side: str = "both"   # "long" | "short" | "both"
+
+
+class SetTakeProfitRequest(BaseModel):
+    symbol: str
+    exchange: str
+    take_profit_price: float
+
+
+class CancelTakeProfitRequest(BaseModel):
     symbol: str
     exchange: str
 

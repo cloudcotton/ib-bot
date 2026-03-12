@@ -89,6 +89,10 @@
           <label>止损价 <small style="color:var(--text-dim)">(可选)</small></label>
           <input id="trade-stop-price" type="number" step="0.25" placeholder="留空则不挂止损单" />
         </div>
+        <div class="form-row" id="row-tp-price">
+          <label>止盈价 <small style="color:var(--text-dim)">(可选)</small></label>
+          <input id="trade-tp-price" type="number" step="0.25" placeholder="留空则不挂止盈单" />
+        </div>
         <div class="form-row">
           <button class="btn btn-primary" onclick="submitTrade()">提交</button>
         </div>
@@ -96,23 +100,49 @@
       </div>
     </section>
 
-    <!-- ── 止损管理 ── -->
+    <!-- ── 静态止损管理 ── -->
     <section>
-      <h2>止损管理</h2>
+      <h2>静态止损</h2>
       <div class="panel">
         <div class="form-row">
           <label>合约</label>
           <select id="stop-key"></select>
         </div>
         <div class="form-row">
-          <label>止损价</label>
-          <input id="stop-price" type="number" step="0.25" placeholder="新止损价" />
+          <label>多头止损价 <small style="color:var(--text-dim)">(price &lt; 此价平多)</small></label>
+          <input id="stop-long" type="number" step="0.25" placeholder="留空则不修改" />
+        </div>
+        <div class="form-row">
+          <label>空头止损价 <small style="color:var(--text-dim)">(price &gt; 此价平空)</small></label>
+          <input id="stop-short" type="number" step="0.25" placeholder="留空则不修改" />
         </div>
         <div class="form-row" style="gap:8px">
-          <button class="btn btn-warning" onclick="submitSetStop()">设置/修改止损</button>
-          <button class="btn btn-secondary" onclick="submitCancelStop()">撤销止损单</button>
+          <button class="btn btn-warning" onclick="submitSetStop()">设置/修改</button>
+          <button class="btn btn-secondary" onclick="submitCancelStop('long')">撤销多头</button>
+          <button class="btn btn-secondary" onclick="submitCancelStop('short')">撤销空头</button>
+          <button class="btn btn-secondary" onclick="submitCancelStop('both')">全部撤销</button>
         </div>
         <div id="stop-msg" class="msg"></div>
+      </div>
+    </section>
+
+    <!-- ── 止盈管理 ── -->
+    <section>
+      <h2>止盈管理</h2>
+      <div class="panel">
+        <div class="form-row">
+          <label>合约</label>
+          <select id="tp-key"></select>
+        </div>
+        <div class="form-row">
+          <label>止盈价</label>
+          <input id="tp-price" type="number" step="0.25" placeholder="新止盈价" />
+        </div>
+        <div class="form-row" style="gap:8px">
+          <button class="btn btn-warning" onclick="submitSetTp()">设置/修改止盈</button>
+          <button class="btn btn-secondary" onclick="submitCancelTp()">撤销止盈单</button>
+        </div>
+        <div id="tp-msg" class="msg"></div>
       </div>
     </section>
 

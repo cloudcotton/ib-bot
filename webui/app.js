@@ -16,9 +16,10 @@ function setAction(a) {
   _action = a;
   document.getElementById('btn-open').classList.toggle('active', a === 'open');
   document.getElementById('btn-close').classList.toggle('active', a === 'close');
-  // 平仓时不需要手数和止损价
+  // 平仓时不需要手数、止损价和止盈价
   document.getElementById('row-qty').style.display        = a === 'open' ? 'flex' : 'none';
   document.getElementById('row-stop-price').style.display = a === 'open' ? 'flex' : 'none';
+  document.getElementById('row-tp-price').style.display   = a === 'open' ? 'flex' : 'none';
 }
 
 function setDirection(d) {
@@ -190,6 +191,10 @@ function buildCardDisplay(c) {
           <div class="val" style="color:var(--red)">${fmt(c.stop_price, 2)}</div>
         </div>
         <div class="pos-info-cell">
+          <div class="label">止盈价</div>
+          <div class="val" style="color:var(--green)">${fmt(c.take_profit_price, 2)}</div>
+        </div>
+        <div class="pos-info-cell">
           <div class="label">浮动盈亏(pt)</div>
           <div class="val ${pnlClass}">${fmt(c.pnl_pts, 2)}</div>
         </div>
@@ -228,6 +233,14 @@ function buildCardDisplay(c) {
                    c.last_signal === 'CLOSE_SHORT' ? 'signal-close-short' : 'signal-none';
   const sigTime = c.last_signal_time ? ` @ ${c.last_signal_time.slice(11, 19)}` : '';
 
+  // 静态止损展示行（设置了才显示）
+  let staticStopHTML = '';
+  if (c.static_long_stop || c.static_short_stop) {
+    const lsPart  = c.static_long_stop  ? `<span style="color:var(--red)">多头止损: ${fmt(c.static_long_stop, 2)}</span>`  : '';
+    const ssPart  = c.static_short_stop ? `<span style="color:var(--red)">空头止损: ${fmt(c.static_short_stop, 2)}</span>` : '';
+    staticStopHTML = `<div class="reversal-row">${lsPart}${ssPart}</div>`;
+  }
+
   return `
     <div class="card-header">
       <span class="card-title">${c.symbol}
@@ -237,6 +250,7 @@ function buildCardDisplay(c) {
     </div>
     <div class="card-body">
       ${posInfoHTML}
+      ${staticStopHTML}
       ${reversalHTML}
       ${klineHTML}
       <div class="signal-row ${sigClass}">双K止损信号: ${sigText}${sigTime}</div>
@@ -285,14 +299,19 @@ function syncCardControlValues(card, c) {
 
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
 function syncSelects(contracts) {
-  ['trade-key', 'stop-key'].forEach(id => {
+  ['trade-key', 'stop-key', 'tp-key'].forEach(id => {
     const sel = document.getElementById(id);
     const cur = sel.value;
     const opts = contracts.map(c => {
       const key = `${c.symbol}@${c.exchange}`;
       const pos = c.position !== 0 ? ` [${c.position > 0 ? '多' : '空'} ${Math.abs(c.position)}]` : '';
-      const stop = c.stop_price ? ` SL:${c.stop_price}` : '';
-      return `<option value="${key}"${key === cur ? ' selected' : ''}>${c.symbol}@${c.exchange}${pos}${stop}</option>`;
+      const stop = [
+        c.static_long_stop  ? `多SL:${c.static_long_stop}`  : '',
+        c.static_short_stop ? `空SL:${c.static_short_stop}` : '',
+      ].filter(Boolean).join(' ');
+      const stopStr = stop ? ` [${stop}]` : '';
+      const tp   = c.take_profit_price ? ` TP:${c.take_profit_price}` : '';
+      return `<option value="${key}"${key === cur ? ' selected' : ''}>${c.symbol}@${c.exchange}${pos}${stopStr}${tp}</option>`;
     });
     sel.innerHTML = '<option value="">— 选择合约 —</option>' + opts.join('');
     if (cur) sel.value = cur;
@@ -320,10 +339,14 @@ async function submitTrade() {
     const sp = parseFloat(document.getElementById('trade-stop-price').value);
     if (sp) body.stop_price = sp;
 
+    const tp = parseFloat(document.getElementById('trade-tp-price').value);
+    if (tp) body.take_profit_price = tp;
+
     const dir = _direction === 'long' ? '多' : '空';
     const typeLabel = _orderType === 'market' ? '市价' : `限价`;
+    const extra = [sp ? '止损@' + sp : '', tp ? '止盈@' + tp : ''].filter(Boolean).join(' ');
     await apiCall('/api/trade/open', body, 'trade-msg',
-      `开仓已发送（${dir} ${qty} 手 ${typeLabel}${sp ? ' 止损@' + sp : ''}）`);
+      `开仓已发送（${dir} ${qty} 手 ${typeLabel}${extra ? ' ' + extra : ''}）`);
 
   } else {
     const body = { symbol, exchange, order_type: _orderType };
@@ -339,21 +362,44 @@ async function submitTrade() {
   }
 }
 
-// ── 止损设置 ──────────────────────────────────────────────────────────────
+// ── 静态止损设置 ──────────────────────────────────────────────────────────
 async function submitSetStop() {
   const key = document.getElementById('stop-key').value;
   if (!key) return showMsg('stop-msg', '请选择合约', false);
-  const sp = parseFloat(document.getElementById('stop-price').value);
-  if (!sp) return showMsg('stop-msg', '请填写止损价', false);
+  const ls = parseFloat(document.getElementById('stop-long').value);
+  const ss = parseFloat(document.getElementById('stop-short').value);
+  if (!ls && !ss) return showMsg('stop-msg', '请至少填写一个止损价', false);
   const [symbol, exchange] = key.split('@');
-  await apiCall('/api/trade/set_stop', { symbol, exchange, stop_price: sp }, 'stop-msg', `止损价已设置: ${sp}`);
+  const body = { symbol, exchange };
+  if (ls > 0) body.long_stop  = ls;
+  if (ss > 0) body.short_stop = ss;
+  const parts = [ls > 0 ? `多头@${ls}` : '', ss > 0 ? `空头@${ss}` : ''].filter(Boolean);
+  await apiCall('/api/trade/set_stop', body, 'stop-msg', `静态止损已设置: ${parts.join(' / ')}`);
 }
 
-async function submitCancelStop() {
+async function submitCancelStop(side) {
   const key = document.getElementById('stop-key').value;
   if (!key) return showMsg('stop-msg', '请选择合约', false);
   const [symbol, exchange] = key.split('@');
-  await apiCall('/api/trade/cancel_stop', { symbol, exchange }, 'stop-msg', '止损单已撤销');
+  const label = side === 'long' ? '多头' : side === 'short' ? '空头' : '全部';
+  await apiCall('/api/trade/cancel_stop', { symbol, exchange, side }, 'stop-msg', `${label}静态止损已撤销`);
+}
+
+// ── 止盈设置 ──────────────────────────────────────────────────────────────
+async function submitSetTp() {
+  const key = document.getElementById('tp-key').value;
+  if (!key) return showMsg('tp-msg', '请选择合约', false);
+  const tp = parseFloat(document.getElementById('tp-price').value);
+  if (!tp) return showMsg('tp-msg', '请填写止盈价', false);
+  const [symbol, exchange] = key.split('@');
+  await apiCall('/api/trade/set_tp', { symbol, exchange, take_profit_price: tp }, 'tp-msg', `止盈价已设置: ${tp}`);
+}
+
+async function submitCancelTp() {
+  const key = document.getElementById('tp-key').value;
+  if (!key) return showMsg('tp-msg', '请选择合约', false);
+  const [symbol, exchange] = key.split('@');
+  await apiCall('/api/trade/cancel_tp', { symbol, exchange }, 'tp-msg', '止盈单已撤销');
 }
 
 // ── 抄底摸顶（卡片内联操作）────────────────────────────────────────────

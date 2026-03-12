@@ -335,6 +335,23 @@ class IBClient:
         logger.info(f"止损单: {contract.symbol} {action} {qty} STP @ {stop_price}")
         return self.ib.placeOrder(contract, order)
 
+    def place_take_profit_order(
+        self,
+        contract,
+        position_direction: str,   # "long" | "short"（决定止盈方向）
+        qty: float,
+        take_profit_price: float,
+    ):
+        """提交 IB 原生止盈限价单（LMT）。
+
+        多头止盈 → SELL LMT；空头止盈 → BUY LMT。
+        IB 服务端执行，即使 Bot 断线仍然有效。
+        """
+        action = "SELL" if position_direction == "long" else "BUY"
+        order = LimitOrder(action, qty, take_profit_price)
+        logger.info(f"止盈单: {contract.symbol} {action} {qty} LMT @ {take_profit_price}")
+        return self.ib.placeOrder(contract, order)
+
     def cancel_order(self, trade) -> None:
         """撤销指定订单（传入 Trade 对象）。"""
         try:

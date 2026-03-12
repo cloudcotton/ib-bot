@@ -78,6 +78,14 @@ class ContractMonitor:
         self._stop_trade = None                       # ib_insync Trade 对象
         self._stop_price: Optional[float] = None      # 当前止损价
 
+        # IB 止盈单追踪
+        self._tp_trade = None                         # ib_insync Trade 对象
+        self._tp_price: Optional[float] = None        # 当前止盈价
+
+        # 静态止损（bot 端检测，与双K止损并列）
+        self._static_long_stop: Optional[float] = None   # 多头止损：tick < 该价时平多
+        self._static_short_stop: Optional[float] = None  # 空头止损：tick > 该价时平空
+
         # 平仓执行状态
         self._in_flight: bool = False
         self._close_lock = asyncio.Lock()        # 防止异步重入
@@ -102,6 +110,7 @@ class ContractMonitor:
         elif qty == 0:
             self._entry_price = None
             self._stop_price = None
+            self._tp_price = None
             if self._stop_trade is not None:
                 # 持仓归零（IB 强平或保证金不足触发），主动撤销残留止损单。
                 # 若止损单尚未触发，孤立订单可能在后续行情中意外反向开仓。
@@ -110,6 +119,11 @@ class ContractMonitor:
                                     label=f"{self.cfg.key} 强平后撤止损")
             else:
                 self._stop_trade = None
+            if self._tp_trade is not None:
+                _safe_ensure_future(self._cancel_tp_order(),
+                                    label=f"{self.cfg.key} 强平后撤止盈")
+            else:
+                self._tp_trade = None
         if old != qty:
             logger.info(f"[{self.cfg.key}] 持仓: {old} → {qty}  均价={avg_cost:.4f}")
 
@@ -132,6 +146,7 @@ class ContractMonitor:
             if price <= 0:
                 continue
             # 先检测止损（Kn.low/Kn.high 尚未被当前 tick 更新）
+            self._check_static_stops(price)
             self._check_and_fire(price)
             try:
                 has_new_bar = self._tick_builder.on_tick(price, size, t.time)
@@ -141,6 +156,46 @@ class ContractMonitor:
             # K 线收盘时检查抄底/摸顶开仓信号
             if has_new_bar and self.buffer.completed:
                 self._check_reversal_entry(self.buffer.completed[-1])
+
+    def _check_static_stops(self, tick_price: float) -> None:
+        """静态止损检测：每 tick 比较预设止损价，触发时立即清零并平仓。
+        独立于双K止损信号开关，设置后始终有效。
+        """
+        # 多头止损：价格跌破 static_long_stop
+        if self._static_long_stop is not None and tick_price < self._static_long_stop:
+            triggered = self._static_long_stop
+            self._static_long_stop = None   # 先清零，防止后续 tick 重复触发
+            if self._position > 0 and not self._in_flight:
+                self._in_flight = True
+                logger.info(
+                    f"[{self.cfg.key}] 静态多头止损触发: {tick_price} < {triggered}，平多"
+                )
+                _safe_ensure_future(
+                    self._execute_close(Signal.CLOSE_LONG, reason="静态止损"),
+                    label=f"{self.cfg.key} static_long_stop",
+                )
+            else:
+                logger.info(
+                    f"[{self.cfg.key}] 静态多头止损触发: {tick_price} < {triggered}，无多仓，仅清零"
+                )
+
+        # 空头止损：价格突破 static_short_stop
+        if self._static_short_stop is not None and tick_price > self._static_short_stop:
+            triggered = self._static_short_stop
+            self._static_short_stop = None  # 先清零，防止后续 tick 重复触发
+            if self._position < 0 and not self._in_flight:
+                self._in_flight = True
+                logger.info(
+                    f"[{self.cfg.key}] 静态空头止损触发: {tick_price} > {triggered}，平空"
+                )
+                _safe_ensure_future(
+                    self._execute_close(Signal.CLOSE_SHORT, reason="静态止损"),
+                    label=f"{self.cfg.key} static_short_stop",
+                )
+            else:
+                logger.info(
+                    f"[{self.cfg.key}] 静态空头止损触发: {tick_price} > {triggered}，无空仓，仅清零"
+                )
 
     def _check_and_fire(self, tick_price: float) -> None:
         """双K止损检测（辅助退出信号）。须在 on_tick() 更新极值前调用。"""
@@ -269,8 +324,9 @@ class ContractMonitor:
         async with self._close_lock:
             pos_qty = self._position
             try:
-                # 先撤销 IB 止损单（避免重复平仓）
+                # 先撤销 IB 止损单和止盈单（避免重复平仓）
                 await self._cancel_stop_order()
+                await self._cancel_tp_order()
 
                 success = await self._ib.close_position(self.contract, pos_qty)
                 if success and self._notifier:
@@ -297,6 +353,15 @@ class ContractMonitor:
                 logger.warning(f"[{self.cfg.key}] 撤止损单异常: {e}")
             self._stop_trade = None
             self._stop_price = None
+
+    async def _cancel_tp_order(self) -> None:
+        if self._tp_trade is not None:
+            try:
+                self._ib.cancel_order(self._tp_trade)
+            except Exception as e:
+                logger.warning(f"[{self.cfg.key}] 撤止盈单异常: {e}")
+            self._tp_trade = None
+            self._tp_price = None
 
     # ── 状态快照 ───────────────────────────────────────────────────────────
 
@@ -325,6 +390,9 @@ class ContractMonitor:
             "current_price": cp,
             "pnl_pts": round(pnl_pts, 4) if pnl_pts is not None else None,
             "stop_price": self._stop_price,
+            "take_profit_price": self._tp_price,
+            "static_long_stop": self._static_long_stop,
+            "static_short_stop": self._static_short_stop,
             "klines_ready": buf.ready,
             "in_flight": self._in_flight,
             "last_signal": self._last_signal,
@@ -509,8 +577,9 @@ class TradingEngine:
         order_type: str,
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
     ) -> dict:
-        """开仓，可同时设置止损价（开仓成交后自动挂 IB 止损单）。"""
+        """开仓，可同时设置止损价/止盈价（开仓成交后自动挂 IB 对应单）。"""
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
@@ -530,19 +599,26 @@ class TradingEngine:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-        # 成交后挂止损单
-        if stop_price is not None:
+        # 成交后挂止损单和/或止盈单
+        if stop_price is not None or take_profit_price is not None:
             _stop_price = stop_price
+            _tp_price = take_profit_price
             _direction = direction
             _qty = qty
 
             def on_entry_filled(t):
                 fill = t.orderStatus.avgFillPrice
                 logger.info(f"[{key}] 开仓成交: {_direction} {_qty} @ {fill}")
-                _safe_ensure_future(
-                    self._submit_stop(monitor, _direction, _qty, _stop_price),
-                    label=f"{key} _submit_stop",
-                )
+                if _stop_price is not None:
+                    _safe_ensure_future(
+                        self._submit_stop(monitor, _direction, _qty, _stop_price),
+                        label=f"{key} _submit_stop",
+                    )
+                if _tp_price is not None:
+                    _safe_ensure_future(
+                        self._submit_take_profit(monitor, _direction, _qty, _tp_price),
+                        label=f"{key} _submit_take_profit",
+                    )
 
             trade.filledEvent += on_entry_filled
 
@@ -553,6 +629,7 @@ class TradingEngine:
             "direction": direction,
             "qty": qty,
             "stop_price": stop_price,
+            "take_profit_price": take_profit_price,
         }
 
     async def _submit_stop(
@@ -592,10 +669,81 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"[{monitor.cfg.key}] 提交止损单失败: {e}")
 
-    # ── 止损价管理 ─────────────────────────────────────────────────────────
+    async def _submit_take_profit(
+        self, monitor: ContractMonitor,
+        direction: str, qty: float, take_profit_price: float,
+    ) -> None:
+        """开仓成交后提交 IB 止盈限价单，并监听成交事件。"""
+        try:
+            await monitor._cancel_tp_order()
 
-    async def set_stop_loss(self, key: str, stop_price: float) -> dict:
-        """为当前持仓设置或修改止损价（重新挂 IB 止损单）。"""
+            tp_trade = self.ib_client.place_take_profit_order(
+                contract=monitor.contract,
+                position_direction=direction,
+                qty=qty,
+                take_profit_price=take_profit_price,
+            )
+            monitor._tp_trade = tp_trade
+            monitor._tp_price = take_profit_price
+            logger.info(f"[{monitor.cfg.key}] IB 止盈单已提交 @ {take_profit_price}")
+
+            def on_tp_filled(t):
+                fill = t.orderStatus.avgFillPrice
+                logger.info(f"[{monitor.cfg.key}] IB 止盈单触发 @ {fill}")
+                monitor._tp_trade = None
+                monitor._tp_price = None
+                if self._notifier:
+                    self._notifier.send(
+                        f"✅ <b>止盈触发（IB 执行）</b>\n"
+                        f"合约: <code>{monitor.cfg.symbol}@{monitor.cfg.exchange}</code>\n"
+                        f"成交价: {fill}"
+                    )
+
+            tp_trade.filledEvent += on_tp_filled
+
+        except Exception as e:
+            logger.error(f"[{monitor.cfg.key}] 提交止盈单失败: {e}")
+
+    # ── 静态止损管理 ───────────────────────────────────────────────────────
+
+    async def set_static_stop(
+        self, key: str,
+        long_stop: Optional[float] = None,
+        short_stop: Optional[float] = None,
+    ) -> dict:
+        """设置/修改静态止损价（bot 端每 tick 检测，无论是否持仓均有效）。
+        long_stop: 多头止损价（price < 该值时平所有多仓并清零）
+        short_stop: 空头止损价（price > 该值时平所有空仓并清零）
+        传 None 表示不修改对应方向，传 0 表示清除。
+        """
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if long_stop is not None:
+            monitor._static_long_stop = long_stop if long_stop > 0 else None
+        if short_stop is not None:
+            monitor._static_short_stop = short_stop if short_stop > 0 else None
+        return {
+            "success": True,
+            "static_long_stop": monitor._static_long_stop,
+            "static_short_stop": monitor._static_short_stop,
+        }
+
+    async def cancel_static_stop(self, key: str, side: str = "both") -> dict:
+        """撤销静态止损价。side: 'long' | 'short' | 'both'"""
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if side in ("long", "both"):
+            monitor._static_long_stop = None
+        if side in ("short", "both"):
+            monitor._static_short_stop = None
+        return {"success": True}
+
+    # ── 止盈价管理 ─────────────────────────────────────────────────────────
+
+    async def set_take_profit(self, key: str, take_profit_price: float) -> dict:
+        """为当前持仓设置或修改止盈价（重新挂 IB 限价止盈单）。"""
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
@@ -605,15 +753,15 @@ class TradingEngine:
         direction = "long" if monitor._position > 0 else "short"
         qty = abs(monitor._position)
 
-        await self._submit_stop(monitor, direction, qty, stop_price)
-        return {"success": True, "stop_price": stop_price}
+        await self._submit_take_profit(monitor, direction, qty, take_profit_price)
+        return {"success": True, "take_profit_price": take_profit_price}
 
-    async def cancel_stop_loss(self, key: str) -> dict:
-        """撤销当前止损单。"""
+    async def cancel_take_profit(self, key: str) -> dict:
+        """撤销当前止盈单。"""
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
-        await monitor._cancel_stop_order()
+        await monitor._cancel_tp_order()
         return {"success": True}
 
     # ── 手动平仓 ───────────────────────────────────────────────────────────
@@ -629,8 +777,9 @@ class TradingEngine:
         if monitor._position == 0:
             return {"success": False, "error": "当前无持仓"}
 
-        # 先撤止损单，再平仓
+        # 先撤止损单和止盈单，再平仓
         await monitor._cancel_stop_order()
+        await monitor._cancel_tp_order()
         success = await self.ib_client.close_position(
             monitor.contract, monitor._position, order_type, limit_price
         )

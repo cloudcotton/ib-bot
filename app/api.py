@@ -7,12 +7,14 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from web.schemas import (
-    CancelStopRequest,
+    CancelStaticStopRequest,
+    CancelTakeProfitRequest,
     HealthResponse,
     ManualCloseRequest,
     OpenPositionRequest,
     SetReversalRequest,
-    SetStopRequest,
+    SetStaticStopRequest,
+    SetTakeProfitRequest,
     UpdateNotifyRequest,
     UpdateStrategyRequest,
 )
@@ -71,34 +73,64 @@ async def open_position(body: OpenPositionRequest, request: Request):
         order_type=body.order_type,
         limit_price=body.limit_price,
         stop_price=body.stop_price,
+        take_profit_price=body.take_profit_price,
     )
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "开仓失败"))
     return result
 
 
-# ── 止损管理 ──────────────────────────────────────────────────────────────
+# ── 静态止损管理 ──────────────────────────────────────────────────────────
 
 
 @router.post("/trade/set_stop")
-async def set_stop(body: SetStopRequest, request: Request):
-    """为当前持仓设置或修改止损价（重新挂 IB 止损单）。"""
+async def set_stop(body: SetStaticStopRequest, request: Request):
+    """设置/修改静态止损价（bot 端每 tick 检测，无论是否持仓均有效）。"""
     e = _engine(request)
     key = f"{body.symbol}@{body.exchange}"
-    result = await e.set_stop_loss(key, body.stop_price)
+    if body.long_stop is None and body.short_stop is None:
+        raise HTTPException(400, "至少提供 long_stop 或 short_stop 之一")
+    result = await e.set_static_stop(key, long_stop=body.long_stop, short_stop=body.short_stop)
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "设置止损失败"))
     return result
 
 
 @router.post("/trade/cancel_stop")
-async def cancel_stop(body: CancelStopRequest, request: Request):
-    """撤销当前止损单（不平仓）。"""
+async def cancel_stop(body: CancelStaticStopRequest, request: Request):
+    """撤销静态止损价（不平仓）。side: 'long' | 'short' | 'both'"""
     e = _engine(request)
     key = f"{body.symbol}@{body.exchange}"
-    result = await e.cancel_stop_loss(key)
+    if body.side not in ("long", "short", "both"):
+        raise HTTPException(400, "side 必须是 'long'、'short' 或 'both'")
+    result = await e.cancel_static_stop(key, side=body.side)
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "撤止损失败"))
+    return result
+
+
+# ── 止盈管理 ──────────────────────────────────────────────────────────────
+
+
+@router.post("/trade/set_tp")
+async def set_take_profit(body: SetTakeProfitRequest, request: Request):
+    """为当前持仓设置或修改止盈价（重新挂 IB 限价止盈单）。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    result = await e.set_take_profit(key, body.take_profit_price)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "设置止盈失败"))
+    return result
+
+
+@router.post("/trade/cancel_tp")
+async def cancel_take_profit(body: CancelTakeProfitRequest, request: Request):
+    """撤销当前止盈单（不平仓）。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    result = await e.cancel_take_profit(key)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "撤止盈失败"))
     return result
 
 
