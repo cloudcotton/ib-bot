@@ -16,8 +16,7 @@ function setAction(a) {
   _action = a;
   document.getElementById('btn-open').classList.toggle('active', a === 'open');
   document.getElementById('btn-close').classList.toggle('active', a === 'close');
-  // 平仓时不需要手数、止损价和止盈价
-  document.getElementById('row-qty').style.display        = a === 'open' ? 'flex' : 'none';
+  // 平仓时不需要止损价和止盈价
   document.getElementById('row-stop-price').style.display = a === 'open' ? 'flex' : 'none';
   document.getElementById('row-tp-price').style.display   = a === 'open' ? 'flex' : 'none';
 }
@@ -349,7 +348,9 @@ async function submitTrade() {
       `开仓已发送（${dir} ${qty} 手 ${typeLabel}${extra ? ' ' + extra : ''}）`);
 
   } else {
-    const body = { symbol, exchange, order_type: _orderType };
+    const qty = parseFloat(document.getElementById('trade-qty').value);
+    if (!qty || qty <= 0) return showMsg('trade-msg', '手数必须大于 0', false);
+    const body = { symbol, exchange, qty, order_type: _orderType };
 
     if (_orderType === 'limit') {
       const lp = parseFloat(document.getElementById('trade-limit-price').value);
@@ -358,7 +359,7 @@ async function submitTrade() {
     }
 
     const typeLabel = _orderType === 'market' ? '市价' : '限价';
-    await apiCall('/api/trade/close', body, 'trade-msg', `平仓已发送（${typeLabel}）`);
+    await apiCall('/api/trade/close', body, 'trade-msg', `平仓已发送（${qty} 手 ${typeLabel}）`);
   }
 }
 

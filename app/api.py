@@ -119,7 +119,9 @@ async def manual_close(body: ManualCloseRequest, request: Request):
         raise HTTPException(400, "order_type 必须是 'market' 或 'limit'")
     if body.order_type == "limit" and body.limit_price is None:
         raise HTTPException(400, "限价平仓必须提供 limit_price")
-    result = await e.manual_close(key, body.order_type, body.limit_price)
+    if body.qty is not None and body.qty <= 0:
+        raise HTTPException(400, "qty 必须大于 0")
+    result = await e.manual_close(key, body.order_type, body.limit_price, body.qty)
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "平仓失败"))
     return result

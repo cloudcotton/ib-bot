@@ -25,6 +25,7 @@ class OpenPositionRequest(BaseModel):
 class ManualCloseRequest(BaseModel):
     symbol: str
     exchange: str
+    qty: Optional[float] = None         # None=全部平仓, >0=平指定手数
     order_type: str = "market"          # "market" | "limit"
     limit_price: Optional[float] = None
 

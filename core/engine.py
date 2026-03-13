@@ -746,18 +746,28 @@ class TradingEngine:
         self, key: str,
         order_type: str = "market",
         limit_price: Optional[float] = None,
+        qty: Optional[float] = None,
     ) -> dict:
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
-        if monitor._position == 0:
+        pos = monitor._position
+        if pos == 0:
             return {"success": False, "error": "当前无持仓"}
 
-        # 先撤止损单和止盈单，再平仓
-        await monitor._cancel_stop_order()
-        await monitor._cancel_tp_order()
+        abs_pos = abs(pos)
+        close_qty = abs_pos if (qty is None or qty <= 0) else min(qty, abs_pos)
+        is_full_close = close_qty >= abs_pos
+
+        # 全部平仓时先撤止损单和止盈单；部分平仓时保留
+        if is_full_close:
+            await monitor._cancel_stop_order()
+            await monitor._cancel_tp_order()
+
+        # 保持与持仓方向一致的符号（close_position 据此判断 BUY/SELL）
+        signed_qty = close_qty if pos > 0 else -close_qty
         success = await self.ib_client.close_position(
-            monitor.contract, monitor._position, order_type, limit_price
+            monitor.contract, signed_qty, order_type, limit_price
         )
         return {"success": success}
 
