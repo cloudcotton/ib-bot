@@ -31,24 +31,6 @@ contracts:
     use_rth: false
     enabled: true        # 默认关闭，按需启用
 
-  - symbol: "NQ"          # E-mini Nasdaq-100
-    exchange: "CME"
-    currency: "USD"
-    timeframe: "5m"
-    expiry: ""
-    multiplier: 20
-    use_rth: false
-    enabled: true
-
-  - symbol: "MNQ"         # Micro E-mini Nasdaq-100
-    exchange: "CME"
-    currency: "USD"
-    timeframe: "5m"
-    expiry: ""
-    multiplier: 2
-    use_rth: false
-    enabled: true
-
   - symbol: "HSI"         # 恒生指数期货
     exchange: "HKFE"
     currency: "HKD"
@@ -65,7 +47,25 @@ contracts:
     expiry: ""
     multiplier: 10
     use_rth: true
+    enabled: true        
+
+  - symbol: "NQ"          # E-mini Nasdaq-100
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 20
+    use_rth: false
     enabled: true
+
+  - symbol: "MNQ"         # Micro E-mini Nasdaq-100
+    exchange: "CME"
+    currency: "USD"
+    timeframe: "5m"
+    expiry: ""
+    multiplier: 2
+    use_rth: false
+    enabled: false        # 暂时关闭：IB Tick 订阅上限为 5，待申请提额后重新开启
 
 # ── 账户净值定时记录 ───────────────────────────────────────
 equity_log:

@@ -583,8 +583,6 @@ class TradingEngine:
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
-        if monitor._position != 0:
-            return {"success": False, "error": "已有持仓，请先平仓"}
         if not self.ib_client.is_connected:
             return {"success": False, "error": "IB 未连接"}
 
