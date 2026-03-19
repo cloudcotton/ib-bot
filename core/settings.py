@@ -32,7 +32,8 @@ class ContractConfig(BaseModel):
     exchange: str
     currency: str
     timeframe: str = "5m"
-    expiry: str = ""          # "" = 自动取近月合约
+    expiry: str = ""          # "" = 自动取主力合约；"202506" = 强制指定到期月
+    roll_days: int = 7        # 到期前多少天自动切换到下一合约（仅 expiry="" 时有效）
     multiplier: float = 1.0   # 合约乘数（静态配置，优先于 IB 动态返回）
     use_rth: bool = False
     enabled: bool = True

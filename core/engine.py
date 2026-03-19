@@ -525,6 +525,7 @@ class TradingEngine:
             ib_contract = await self.ib_client.resolve_contract(
                 symbol=cfg.symbol, exchange=cfg.exchange,
                 currency=cfg.currency, expiry=cfg.expiry,
+                roll_days=cfg.roll_days,
             )
         except Exception as e:
             logger.error(f"合约解析失败 {cfg.key}: {e}")

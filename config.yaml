@@ -11,13 +11,17 @@ ib:
 # ── 监控合约列表 ──────────────────────────────────────────
 # 支持的 exchange: CME (美股指数期货), HKFE (港股指数期货)
 # 支持的 timeframe: 1m / 5m / 15m / 30m / 1h / 2h / 4h / 1d
-# expiry: "" = 自动取近月合约, "202506" = 指定到期月
+# expiry: "" = 自动选主力合约（按 roll_days 自动滚仓）
+#         "202506" = 强制指定到期月（跳过自动选月逻辑）
+# roll_days: expiry="" 时，距到期 ≤ roll_days 天自动切换到下一合约
+#            季度合约（ES/NQ 等）建议 7；月度合约（HSI/MHI）建议 3
 contracts:
   - symbol: "ES"          # E-mini S&P 500
     exchange: "CME"
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    roll_days: 7
     multiplier: 50        # 固定合约乘数，避免 IB 接口瞬时异常导致均价失真
     use_rth: false        # false = 监控全时段 (适合几乎 23 小时交易的美指期货)
     enabled: true
@@ -27,33 +31,37 @@ contracts:
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    roll_days: 7
     multiplier: 5
     use_rth: false
     enabled: true        # 默认关闭，按需启用
 
-  - symbol: "HSI"         # 恒生指数期货
+  - symbol: "HSI"         # 恒生指数期货（月度合约）
     exchange: "HKFE"
     currency: "HKD"
     timeframe: "5m"
     expiry: ""
+    roll_days: 3          # 月度合约到期前 3 天自动切换
     multiplier: 50
     use_rth: true         # true = 仅正常交易时段（港股期货有午休）
     enabled: true
 
-  - symbol: "MHI"         # 小型恒生指数期货
+  - symbol: "MHI"         # 小型恒生指数期货（月度合约）
     exchange: "HKFE"
     currency: "HKD"
     timeframe: "5m"
     expiry: ""
+    roll_days: 3          # 月度合约到期前 3 天自动切换
     multiplier: 10
     use_rth: true
-    enabled: true        
+    enabled: true
 
   - symbol: "NQ"          # E-mini Nasdaq-100
     exchange: "CME"
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    roll_days: 7
     multiplier: 20
     use_rth: false
     enabled: true
@@ -63,6 +71,7 @@ contracts:
     currency: "USD"
     timeframe: "5m"
     expiry: ""
+    roll_days: 7
     multiplier: 2
     use_rth: false
     enabled: false        # 暂时关闭：IB Tick 订阅上限为 5，待申请提额后重新开启

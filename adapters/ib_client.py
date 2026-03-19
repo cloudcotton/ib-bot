@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from ib_insync import (
@@ -124,8 +124,15 @@ class IBClient:
         exchange: str,
         currency: str,
         expiry: str = "",
+        roll_days: int = 7,
     ):
-        """解析期货合约，expiry 为空时自动取近月合约。"""
+        """解析期货合约。
+
+        expiry 非空时直接使用指定到期月（如 "202506"）；
+        expiry 为空时自动选主力合约：
+          - 过滤已到期合约，按到期日升序排列
+          - 若最近合约将在 roll_days 天内到期，自动切换到下一个合约
+        """
         if expiry:
             contract = Future(symbol, expiry, exchange, currency=currency)
             qualified = await self.ib.qualifyContractsAsync(contract)
@@ -138,16 +145,38 @@ class IBClient:
         if not details:
             raise ValueError(f"找不到合约详情: {symbol}@{exchange}")
 
-        today = datetime.now().strftime("%Y%m%d")
+        today = datetime.now().date()
+        today_str = today.strftime("%Y%m%d")
         active = [
             d for d in details
-            if d.contract.lastTradeDateOrContractMonth >= today
+            if d.contract.lastTradeDateOrContractMonth >= today_str
         ]
         if not active:
             active = details
         active.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
-        contract = active[0].contract
-        logger.info(f"近月合约: {symbol}@{exchange} → 到期={contract.lastTradeDateOrContractMonth}")
+
+        chosen = active[0]
+        if len(active) > 1 and roll_days > 0:
+            expiry_raw = chosen.contract.lastTradeDateOrContractMonth
+            # lastTradeDateOrContractMonth 可能是 "YYYYMMDD" 或 "YYYYMM"
+            if len(expiry_raw) == 6:
+                expiry_date_str = expiry_raw + "28"  # 月度合约：保守取28日
+            else:
+                expiry_date_str = expiry_raw[:8]
+            try:
+                expiry_date = datetime.strptime(expiry_date_str, "%Y%m%d").date()
+                days_to_expiry = (expiry_date - today).days
+                if days_to_expiry <= roll_days:
+                    chosen = active[1]
+                    logger.info(
+                        f"合约 {symbol} 距到期仅 {days_to_expiry} 天（≤{roll_days}），"
+                        f"自动切换到下一合约: {chosen.contract.lastTradeDateOrContractMonth}"
+                    )
+            except ValueError:
+                pass  # 解析失败则不滚仓，使用最近合约
+
+        contract = chosen.contract
+        logger.info(f"主力合约: {symbol}@{exchange} → 到期={contract.lastTradeDateOrContractMonth}")
         return contract
 
     # ── K 线历史拉取（一次性）──────────────────────────────────────────────
