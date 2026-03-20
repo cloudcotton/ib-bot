@@ -54,6 +54,7 @@ fetchStatus();
 function render(data) {
   setConnBadge(data);
   syncSignalToggle(data.signal_enabled !== false);
+  syncEmaStopToggle(data.ema_stop_enabled === true);
   renderAccount(data.account || {});
   renderContracts(data.contracts || []);
   syncSelects(data.contracts || []);
@@ -62,6 +63,16 @@ function render(data) {
 function syncSignalToggle(enabled) {
   const cb  = document.getElementById('signal-enabled');
   const lbl = document.getElementById('signal-label');
+  if (cb)  cb.checked = enabled;
+  if (lbl) {
+    lbl.textContent = enabled ? '已启用' : '已暂停';
+    lbl.className   = 'toggle-label ' + (enabled ? 'on' : 'off');
+  }
+}
+
+function syncEmaStopToggle(enabled) {
+  const cb  = document.getElementById('ema-stop-enabled');
+  const lbl = document.getElementById('ema-stop-label');
   if (cb)  cb.checked = enabled;
   if (lbl) {
     lbl.textContent = enabled ? '已启用' : '已暂停';
@@ -225,6 +236,19 @@ function buildCardDisplay(c) {
     reversalHTML = `<div class="reversal-row">${buyPart}${sellPart}${qtyPart}</div>`;
   }
 
+  // EMA 均线展示行（有值时才显示）
+  let emaHTML = '';
+  if (c.ema20 != null || c.ema40 != null || c.ema60 != null) {
+    const emaStopOn = _lastStatus && _lastStatus.ema_stop_enabled === true;
+    const emaColor = emaStopOn ? 'var(--blue)' : 'var(--text-dim)';
+    const emaParts = [
+      c.ema20 != null ? `EMA20: ${fmt(c.ema20)}` : 'EMA20: —',
+      c.ema40 != null ? `EMA40: ${fmt(c.ema40)}` : 'EMA40: —',
+      c.ema60 != null ? `EMA60: ${fmt(c.ema60)}` : 'EMA60: —',
+    ].join('　');
+    emaHTML = `<div class="reversal-row" style="color:${emaColor};font-size:12px">${emaParts}</div>`;
+  }
+
   const sigOn = _lastStatus && _lastStatus.signal_enabled !== false;
   const sigText = sigOn ? (c.last_signal || '—') : '已暂停';
   const sigClass = !sigOn ? 'signal-paused' :
@@ -252,6 +276,7 @@ function buildCardDisplay(c) {
       ${staticStopHTML}
       ${reversalHTML}
       ${klineHTML}
+      ${emaHTML}
       <div class="signal-row ${sigClass}">双K止损信号: ${sigText}${sigTime}</div>
     </div>`;
 }
@@ -420,6 +445,11 @@ async function clearCardReversal(key) {
 async function setSignalEnabled(enabled) {
   await apiCall('/api/params/strategy', { signal_enabled: enabled }, 'strategy-msg',
     enabled ? '双K止损已启用' : '双K止损已暂停');
+}
+
+async function setEmaStopEnabled(enabled) {
+  await apiCall('/api/params/strategy', { ema_stop_enabled: enabled }, 'strategy-msg',
+    enabled ? '均线止损已启用' : '均线止损已暂停');
 }
 
 async function saveStrategy() {

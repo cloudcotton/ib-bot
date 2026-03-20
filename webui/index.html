@@ -141,6 +141,16 @@
           </div>
         </div>
         <div class="form-row">
+          <label>均线止损 <small style="color:var(--text-dim)">(EMA20/40/60 收盘穿越)</small></label>
+          <div class="toggle-row">
+            <label class="toggle-switch">
+              <input type="checkbox" id="ema-stop-enabled" onchange="setEmaStopEnabled(this.checked)" />
+              <span class="toggle-slider"></span>
+            </label>
+            <span id="ema-stop-label" class="toggle-label off">已暂停</span>
+          </div>
+        </div>
+        <div class="form-row">
           <label>信号冷却（秒）</label>
           <input id="param-cooldown" type="number" min="0" step="1" placeholder="30" />
         </div>

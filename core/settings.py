@@ -54,6 +54,7 @@ class ContractConfig(BaseModel):
 class StrategyConfig(BaseModel):
     signal_enabled: bool = True      # 双K止损信号总开关
     signal_cooldown_sec: int = 30
+    ema_stop_enabled: bool = False   # 均线止损（EMA20/40/60）总开关
 
 
 class NotifyConfig(BaseModel):

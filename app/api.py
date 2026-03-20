@@ -152,6 +152,7 @@ async def update_strategy(body: UpdateStrategyRequest, request: Request):
     await e.update_strategy_params(
         cooldown_sec=body.signal_cooldown_sec,
         signal_enabled=body.signal_enabled,
+        ema_stop_enabled=body.ema_stop_enabled,
     )
     return {"success": True, "strategy": e.settings.strategy.model_dump()}
 

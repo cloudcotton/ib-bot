@@ -47,6 +47,7 @@ class CancelStaticStopRequest(BaseModel):
 class UpdateStrategyRequest(BaseModel):
     signal_cooldown_sec: Optional[int] = None
     signal_enabled: Optional[bool] = None
+    ema_stop_enabled: Optional[bool] = None
 
 
 class SetReversalRequest(BaseModel):

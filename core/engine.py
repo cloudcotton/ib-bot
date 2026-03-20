@@ -23,7 +23,7 @@ from core.equity_recorder import EquityRecorder
 from core.kline_manager import Bar, KlineBuffer, TickBarBuilder, _PERIOD_SECONDS
 from core.notifier import TelegramNotifier
 from core.settings import ContractConfig, Settings, save_settings
-from core.strategy import Signal, check_signal
+from core.strategy import Signal, check_ema_signal, check_signal
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,8 @@ class ContractMonitor:
         self._tick_builder: Optional[TickBarBuilder] = None
         self._tick_callback: Optional[object] = None   # 注册到 updateEvent 的引用
         self._initialized: bool = False     # 历史K线是否已预热
-        self._signal_enabled: bool = True   # 双K止损信号开关
+        self._signal_enabled: bool = True    # 双K止损信号开关
+        self._ema_stop_enabled: bool = False # 均线止损（EMA20/40/60）开关
 
         # 持仓状态
         self._position: float = 0.0
@@ -153,9 +154,11 @@ class ContractMonitor:
             except Exception as e:
                 logger.error(f"[{self.cfg.key}] Tick 处理异常: {e}")
                 continue
-            # K 线收盘时检查抄底/摸顶开仓信号
+            # K 线收盘时检查抄底/摸顶开仓信号及均线止损
             if has_new_bar and self.buffer.completed:
-                self._check_reversal_entry(self.buffer.completed[-1])
+                closed_bar = self.buffer.completed[-1]
+                self._check_reversal_entry(closed_bar)
+                self._check_ema_stop(closed_bar)
 
     def _check_static_stops(self, tick_price: float) -> None:
         """静态止损检测：每 tick 比较预设止损价，触发时立即清零并平仓。
@@ -287,6 +290,28 @@ class ContractMonitor:
                     f"[{self.cfg.key}] 摸顶价 {sell_target:.4f} 被突破，收盘 {sell_target:.4f} 未回 → 清零不开仓"
                 )
 
+    def _check_ema_stop(self, closed_bar: Bar) -> None:
+        """均线止损检测（K 线收盘时调用）。
+        收盘价突破 EMA20/40/60 全部同侧时触发平仓。
+        """
+        if not self._ema_stop_enabled:
+            return
+        signal = check_ema_signal(self.buffer, self._position, closed_bar)
+        if signal is None:
+            return
+        if self._in_flight:
+            return
+        self._in_flight = True
+        logger.info(
+            f"[{self.cfg.key}] 均线止损信号: {signal.value} "
+            f"持仓={self._position} close={closed_bar.close:.4f} "
+            f"ema20={self.buffer.ema20:.4f} ema40={self.buffer.ema40:.4f} ema60={self.buffer.ema60:.4f}"
+        )
+        _safe_ensure_future(
+            self._execute_close(signal, reason="均线止损"),
+            label=f"{self.cfg.key} ema_stop",
+        )
+
     async def _execute_open(self, direction: str, trigger_price: float) -> None:
         """市价开仓（抄底/摸顶），双K止损启用时自动跟踪止损。"""
         if self._position != 0:
@@ -402,6 +427,8 @@ class ContractMonitor:
                 else None
             ),
             "ema20": round(buf.ema20, 4) if buf.ema20 is not None else None,
+            "ema40": round(buf.ema40, 4) if buf.ema40 is not None else None,
+            "ema60": round(buf.ema60, 4) if buf.ema60 is not None else None,
             "current_bar": current.to_dict() if current else None,
             "k1": k1.to_dict() if k1 else None,
             "k2": k2.to_dict() if k2 else None,
@@ -504,8 +531,8 @@ class TradingEngine:
         """
         if not hist:
             return
-        # 已完成 K 线：排除最后一根（partial），最多取 24 根（EMA20 需 20 根种子）
-        for b in hist[:-1][-24:]:
+        # 已完成 K 线：排除最后一根（partial），最多取 64 根（EMA60 需 60 根种子）
+        for b in hist[:-1][-64:]:
             buffer.add_completed(Bar(
                 time=str(b.date), open=float(b.open), high=float(b.high),
                 low=float(b.low), close=float(b.close), volume=float(b.volume or 0),
@@ -536,6 +563,8 @@ class TradingEngine:
             notifier=self._notifier,
             cooldown_sec=self.settings.strategy.signal_cooldown_sec,
         )
+        monitor._signal_enabled = self.settings.strategy.signal_enabled
+        monitor._ema_stop_enabled = self.settings.strategy.ema_stop_enabled
         qty = self.ib_client.get_position(ib_contract.conId)
         avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
         monitor.update_position(qty, avg_cost)
@@ -958,6 +987,7 @@ class TradingEngine:
             "reconnecting": reconnecting,
             "reconnect_attempt": self._reconnect_attempt if reconnecting else 0,
             "signal_enabled": self.settings.strategy.signal_enabled,
+            "ema_stop_enabled": self.settings.strategy.ema_stop_enabled,
             "account": self.ib_client.get_account_summary(),
             "contracts": [m.get_status() for m in self._monitors.values()],
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -999,6 +1029,7 @@ class TradingEngine:
         self,
         cooldown_sec: Optional[int] = None,
         signal_enabled: Optional[bool] = None,
+        ema_stop_enabled: Optional[bool] = None,
     ) -> None:
         if cooldown_sec is not None:
             self.settings.strategy.signal_cooldown_sec = cooldown_sec
@@ -1008,5 +1039,10 @@ class TradingEngine:
             self.settings.strategy.signal_enabled = signal_enabled
             for m in self._monitors.values():
                 m._signal_enabled = signal_enabled
-            save_settings(self.settings)
             logger.info(f"双K止损已{'启用' if signal_enabled else '暂停'}")
+        if ema_stop_enabled is not None:
+            self.settings.strategy.ema_stop_enabled = ema_stop_enabled
+            for m in self._monitors.values():
+                m._ema_stop_enabled = ema_stop_enabled
+            logger.info(f"均线止损已{'启用' if ema_stop_enabled else '暂停'}")
+        save_settings(self.settings)

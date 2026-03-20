@@ -23,7 +23,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from .kline_manager import KlineBuffer
+from .kline_manager import Bar, KlineBuffer
 
 
 class Signal(str, Enum):
@@ -65,5 +65,46 @@ def check_signal(
     elif position < 0:  # 空头 → 监控平空信号
         if tick_price > max(kn.high, k1.high, k2.high):
             return Signal.CLOSE_SHORT
+
+    return None
+
+
+def check_ema_signal(
+    buffer: KlineBuffer,
+    position: float,
+    closed_bar: Bar,
+) -> Optional[Signal]:
+    """均线止损信号检测（K 线收盘时调用）。
+
+    策略：K 线收盘价与 EMA20/40/60 的关系
+      平空: close > max(EMA20, EMA40, EMA60)
+      平多: close < min(EMA20, EMA40, EMA60)
+
+    三条均线均可用时才触发，任一为 None 则跳过。
+
+    Args:
+        buffer:     合约的 K 线缓冲区（EMA 已在 bar 收盘时更新）
+        position:   持仓数量（>0 多头，<0 空头，0 无仓）
+        closed_bar: 刚刚收盘的 K 线
+
+    Returns:
+        Signal.CLOSE_LONG / CLOSE_SHORT，或 None
+    """
+    if position == 0:
+        return None
+
+    ema20, ema40, ema60 = buffer.ema20, buffer.ema40, buffer.ema60
+    if ema20 is None or ema40 is None or ema60 is None:
+        return None
+
+    close = closed_bar.close
+
+    if position < 0:  # 空头 → 收盘价高于所有均线则平空
+        if close > max(ema20, ema40, ema60):
+            return Signal.CLOSE_SHORT
+
+    elif position > 0:  # 多头 → 收盘价低于所有均线则平多
+        if close < min(ema20, ema40, ema60):
+            return Signal.CLOSE_LONG
 
     return None
