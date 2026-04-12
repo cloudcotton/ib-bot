@@ -407,16 +407,16 @@ async function submitTrade() {
       const autoStop = document.getElementById('trade-auto-stop')?.checked;
       if (autoStop) {
         const contract = (_lastStatus?.contracts || []).find(c => `${c.symbol}@${c.exchange}` === key);
+        const kn = contract?.current_bar;
         const k1 = contract?.k1;
-        const k2 = contract?.k2;
-        if (k1 && k2) {
+        if (kn && k1) {
           const stopBody = { symbol, exchange };
           let stopPrice;
           if (_direction === 'long') {
-            stopPrice = Math.min(k1.low, k2.low);
+            stopPrice = Math.min(kn.low, k1.low);
             stopBody.long_stop = stopPrice;
           } else {
-            stopPrice = Math.max(k1.high, k2.high);
+            stopPrice = Math.max(kn.high, k1.high);
             stopBody.short_stop = stopPrice;
           }
           const stopRes = await fetch('/api/trade/set_stop', {
@@ -435,7 +435,7 @@ async function submitTrade() {
           }
         } else {
           showMsg('trade-msg',
-            `开仓已发送（${dir} ${qty} 手 ${typeLabel}），K线不足无法设联动止损`, true);
+            `开仓已发送（${dir} ${qty} 手 ${typeLabel}），K线不足无法设联动止损（需 Kn+K-1）`, true);
         }
       } else {
         showMsg('trade-msg',
