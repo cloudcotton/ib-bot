@@ -24,12 +24,13 @@ function setAction(a) {
   document.getElementById('row-auto-stop').style.display   = isOpen ? 'flex' : 'none';
 }
 
-function syncAutoStopLabel(checked) {
+function syncAutoStopLabel() {
+  const cb  = document.getElementById('trade-auto-stop');
   const lbl = document.getElementById('auto-stop-label');
-  if (lbl) {
-    lbl.textContent = checked ? '已开启' : '已关闭';
-    lbl.className   = 'toggle-label ' + (checked ? 'on' : 'off');
-  }
+  if (!cb || !lbl) return;
+  const checked = cb.checked;
+  lbl.textContent = checked ? '已开启' : '已关闭';
+  lbl.className   = 'toggle-label ' + (checked ? 'on' : 'off');
 }
 
 function setDirection(d) {
