@@ -16,9 +16,20 @@ function setAction(a) {
   _action = a;
   document.getElementById('btn-open').classList.toggle('active', a === 'open');
   document.getElementById('btn-close').classList.toggle('active', a === 'close');
-  // 平仓时不需要止损价和止盈价
-  document.getElementById('row-stop-price').style.display = a === 'open' ? 'flex' : 'none';
-  document.getElementById('row-tp-price').style.display   = a === 'open' ? 'flex' : 'none';
+  // 平仓时不需要止损价、止盈价、位移、联动止损
+  const isOpen = a === 'open';
+  document.getElementById('row-stop-price').style.display  = isOpen ? 'flex' : 'none';
+  document.getElementById('row-tp-price').style.display    = isOpen ? 'flex' : 'none';
+  document.getElementById('row-offset').style.display      = isOpen ? 'flex' : 'none';
+  document.getElementById('row-auto-stop').style.display   = isOpen ? 'flex' : 'none';
+}
+
+function syncAutoStopLabel(checked) {
+  const lbl = document.getElementById('auto-stop-label');
+  if (lbl) {
+    lbl.textContent = checked ? '已开启' : '已关闭';
+    lbl.className   = 'toggle-label ' + (checked ? 'on' : 'off');
+  }
 }
 
 function setDirection(d) {
@@ -356,8 +367,19 @@ async function submitTrade() {
 
     if (_orderType === 'limit') {
       const lp = parseFloat(document.getElementById('trade-limit-price').value);
-      if (!lp) return showMsg('trade-msg', '限价单必须填限价', false);
-      body.limit_price = lp;
+      if (lp > 0) {
+        // 用户已填写限价，直接使用
+        body.limit_price = lp;
+      } else {
+        // 限价为空：用市价 ± 位移自动计算
+        const offset = parseFloat(document.getElementById('trade-offset').value) || 0;
+        const contract = (_lastStatus?.contracts || []).find(c => `${c.symbol}@${c.exchange}` === key);
+        const cp = contract?.current_price;
+        if (!cp) return showMsg('trade-msg', '无法获取当前价，请手动填写限价', false);
+        body.limit_price = _direction === 'long'
+          ? Math.round((cp - offset) * 100) / 100
+          : Math.round((cp + offset) * 100) / 100;
+      }
     }
 
     const sp = parseFloat(document.getElementById('trade-stop-price').value);
@@ -367,10 +389,61 @@ async function submitTrade() {
     if (tp) body.take_profit_price = tp;
 
     const dir = _direction === 'long' ? '多' : '空';
-    const typeLabel = _orderType === 'market' ? '市价' : `限价`;
+    const lpLabel = body.limit_price ? `@${body.limit_price}` : '';
+    const typeLabel = _orderType === 'market' ? '市价' : `限价${lpLabel}`;
     const extra = [sp ? '止损@' + sp : '', tp ? '止盈@' + tp : ''].filter(Boolean).join(' ');
-    await apiCall('/api/trade/open', body, 'trade-msg',
-      `开仓已发送（${dir} ${qty} 手 ${typeLabel}${extra ? ' ' + extra : ''}）`);
+
+    // 发送开仓请求（手动 fetch，以便根据结果决定是否追加联动止损）
+    try {
+      const res = await fetch('/api/trade/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) { showMsg('trade-msg', data.detail || '开仓失败', false); return; }
+
+      // 开仓联动止损
+      const autoStop = document.getElementById('trade-auto-stop')?.checked;
+      if (autoStop) {
+        const contract = (_lastStatus?.contracts || []).find(c => `${c.symbol}@${c.exchange}` === key);
+        const k1 = contract?.k1;
+        const k2 = contract?.k2;
+        if (k1 && k2) {
+          const stopBody = { symbol, exchange };
+          let stopPrice;
+          if (_direction === 'long') {
+            stopPrice = Math.min(k1.low, k2.low);
+            stopBody.long_stop = stopPrice;
+          } else {
+            stopPrice = Math.max(k1.high, k2.high);
+            stopBody.short_stop = stopPrice;
+          }
+          const stopRes = await fetch('/api/trade/set_stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(stopBody),
+          });
+          if (stopRes.ok) {
+            showMsg('trade-msg',
+              `开仓已发送（${dir} ${qty} 手 ${typeLabel}${extra ? ' ' + extra : ''}）` +
+              ` + 静态止损@${stopPrice}`, true);
+          } else {
+            const sd = await stopRes.json();
+            showMsg('trade-msg',
+              `开仓已发送，止损设置失败: ${sd.detail || '未知错误'}`, false);
+          }
+        } else {
+          showMsg('trade-msg',
+            `开仓已发送（${dir} ${qty} 手 ${typeLabel}），K线不足无法设联动止损`, true);
+        }
+      } else {
+        showMsg('trade-msg',
+          `开仓已发送（${dir} ${qty} 手 ${typeLabel}${extra ? ' ' + extra : ''}）`, true);
+      }
+    } catch (e) {
+      showMsg('trade-msg', `网络错误: ${e.message}`, false);
+    }
 
   } else {
     const qty = parseFloat(document.getElementById('trade-qty').value);
