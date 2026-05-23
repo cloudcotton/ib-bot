@@ -65,31 +65,9 @@ fetchStatus();
 // ── 渲染 ──────────────────────────────────────────────────────────────────
 function render(data) {
   setConnBadge(data);
-  syncSignalToggle(data.signal_enabled !== false);
-  syncEmaStopToggle(data.ema_stop_enabled === true);
   renderAccount(data.account || {});
   renderContracts(data.contracts || []);
   syncSelects(data.contracts || []);
-}
-
-function syncSignalToggle(enabled) {
-  const cb  = document.getElementById('signal-enabled');
-  const lbl = document.getElementById('signal-label');
-  if (cb)  cb.checked = enabled;
-  if (lbl) {
-    lbl.textContent = enabled ? '已启用' : '已暂停';
-    lbl.className   = 'toggle-label ' + (enabled ? 'on' : 'off');
-  }
-}
-
-function syncEmaStopToggle(enabled) {
-  const cb  = document.getElementById('ema-stop-enabled');
-  const lbl = document.getElementById('ema-stop-label');
-  if (cb)  cb.checked = enabled;
-  if (lbl) {
-    lbl.textContent = enabled ? '已启用' : '已暂停';
-    lbl.className   = 'toggle-label ' + (enabled ? 'on' : 'off');
-  }
 }
 
 // ── 账户权益栏 ──────────────────────────────────────────────────────────
@@ -251,7 +229,7 @@ function buildCardDisplay(c) {
   // EMA 均线展示行（有值时才显示）
   let emaHTML = '';
   if (c.ema20 != null || c.ema40 != null || c.ema60 != null) {
-    const emaStopOn = _lastStatus && _lastStatus.ema_stop_enabled === true;
+    const emaStopOn = c.ema_stop_enabled === true;
     const emaColor = emaStopOn ? 'var(--blue)' : 'var(--text-dim)';
     const emaParts = [
       c.ema20 != null ? `EMA20: ${fmt(c.ema20)}` : 'EMA20: —',
@@ -261,7 +239,7 @@ function buildCardDisplay(c) {
     emaHTML = `<div class="reversal-row" style="color:${emaColor};font-size:12px">${emaParts}</div>`;
   }
 
-  const sigOn = _lastStatus && _lastStatus.signal_enabled !== false;
+  const sigOn = c.signal_enabled !== false;
   const sigText = sigOn ? (c.last_signal || '—') : '已暂停';
   const sigClass = !sigOn ? 'signal-paused' :
                    c.last_signal === 'CLOSE_LONG'  ? 'signal-close-long'  :
@@ -300,13 +278,36 @@ function klineCell(label, val, color, d = 2) {
   </div>`;
 }
 
-// buildCardControls — 只建一次的抄底/摸顶输入区（不被轮询覆盖）
+// buildCardControls — 只建一次的控制区（策略开关 + 抄底/摸顶）
 function buildCardControls(c) {
   const key    = `${c.symbol}@${c.exchange}`;
   const safeId = key.replace('@', '-');
+  const sigOn  = c.signal_enabled !== false;
+  const emaOn  = c.ema_stop_enabled === true;
   return `
     <div class="card-controls">
-      <div class="ctrl-label">抄底 / 摸顶</div>
+      <div class="ctrl-label">策略开关</div>
+      <div class="ctrl-row ctrl-strategy">
+        <span class="ctrl-strategy-item">
+          <span class="ctrl-strategy-name">双K止损</span>
+          <label class="toggle-switch toggle-xs">
+            <input type="checkbox" id="cst-sig-${safeId}" ${sigOn ? 'checked' : ''}
+                   onchange="setContractStrategy('${key}','signal')" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span id="cst-sig-lbl-${safeId}" class="toggle-label ${sigOn ? 'on' : 'off'}">${sigOn ? '已启用' : '已暂停'}</span>
+        </span>
+        <span class="ctrl-strategy-item">
+          <span class="ctrl-strategy-name">均线止损</span>
+          <label class="toggle-switch toggle-xs">
+            <input type="checkbox" id="cst-ema-${safeId}" ${emaOn ? 'checked' : ''}
+                   onchange="setContractStrategy('${key}','ema')" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span id="cst-ema-lbl-${safeId}" class="toggle-label ${emaOn ? 'on' : 'off'}">${emaOn ? '已启用' : '已暂停'}</span>
+        </span>
+      </div>
+      <div class="ctrl-label" style="margin-top:4px">抄底 / 摸顶</div>
       <div class="ctrl-row">
         <input id="rc-buy-${safeId}"  class="ctrl-input" type="number" step="0.25" placeholder="抄底价" />
         <input id="rc-sell-${safeId}" class="ctrl-input" type="number" step="0.25" placeholder="摸顶价" />
@@ -318,10 +319,12 @@ function buildCardControls(c) {
     </div>`;
 }
 
-// 同步卡片输入框的 placeholder 显示当前值（仅当该输入框未被聚焦时）
+// 同步卡片控制区的动态值（placeholder + 策略开关状态）
 function syncCardControlValues(card, c) {
   const key    = `${c.symbol}@${c.exchange}`;
   const safeId = key.replace('@', '-');
+
+  // 抄底/摸顶输入框 placeholder
   const buyEl  = document.getElementById(`rc-buy-${safeId}`);
   const sellEl = document.getElementById(`rc-sell-${safeId}`);
   const qtyEl  = document.getElementById(`rc-qty-${safeId}`);
@@ -331,6 +334,18 @@ function syncCardControlValues(card, c) {
     sellEl.placeholder = c.sell_target ? `摸顶 ${fmt(c.sell_target)}` : '摸顶价';
   if (qtyEl  && document.activeElement !== qtyEl && !qtyEl.value)
     qtyEl.placeholder  = `手数 (当前 ${c.reversal_qty})`;
+
+  // 策略开关同步（以服务端状态为准）
+  const sigOn  = c.signal_enabled !== false;
+  const emaOn  = c.ema_stop_enabled === true;
+  const sigCb  = document.getElementById(`cst-sig-${safeId}`);
+  const sigLbl = document.getElementById(`cst-sig-lbl-${safeId}`);
+  const emaCb  = document.getElementById(`cst-ema-${safeId}`);
+  const emaLbl = document.getElementById(`cst-ema-lbl-${safeId}`);
+  if (sigCb)  sigCb.checked = sigOn;
+  if (sigLbl) { sigLbl.textContent = sigOn ? '已启用' : '已暂停'; sigLbl.className = 'toggle-label ' + (sigOn ? 'on' : 'off'); }
+  if (emaCb)  emaCb.checked = emaOn;
+  if (emaLbl) { emaLbl.textContent = emaOn ? '已启用' : '已暂停'; emaLbl.className = 'toggle-label ' + (emaOn ? 'on' : 'off'); }
 }
 
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
@@ -516,14 +531,25 @@ async function clearCardReversal(key) {
 }
 
 // ── 策略参数 ──────────────────────────────────────────────────────────────
-async function setSignalEnabled(enabled) {
-  await apiCall('/api/params/strategy', { signal_enabled: enabled }, 'strategy-msg',
-    enabled ? '双K止损已启用' : '双K止损已暂停');
-}
-
-async function setEmaStopEnabled(enabled) {
-  await apiCall('/api/params/strategy', { ema_stop_enabled: enabled }, 'strategy-msg',
-    enabled ? '均线止损已启用' : '均线止损已暂停');
+async function setContractStrategy(key, type) {
+  const safeId = key.replace('@', '-');
+  const [symbol, exchange] = key.split('@');
+  const body = { symbol, exchange };
+  let msg;
+  if (type === 'signal') {
+    const enabled = document.getElementById(`cst-sig-${safeId}`).checked;
+    body.signal_enabled = enabled;
+    const lbl = document.getElementById(`cst-sig-lbl-${safeId}`);
+    if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
+    msg = enabled ? '双K止损已启用' : '双K止损已暂停';
+  } else {
+    const enabled = document.getElementById(`cst-ema-${safeId}`).checked;
+    body.ema_stop_enabled = enabled;
+    const lbl = document.getElementById(`cst-ema-lbl-${safeId}`);
+    if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
+    msg = enabled ? '均线止损已启用' : '均线止损已暂停';
+  }
+  await apiCall('/api/params/contract_strategy', body, `rc-msg-${safeId}`, msg);
 }
 
 async function saveStrategy() {

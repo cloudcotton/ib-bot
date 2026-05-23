@@ -37,6 +37,8 @@ class ContractConfig(BaseModel):
     multiplier: float = 1.0   # 合约乘数（静态配置，优先于 IB 动态返回）
     use_rth: bool = False
     enabled: bool = True
+    signal_enabled: Optional[bool] = None    # None = 使用全局默认
+    ema_stop_enabled: Optional[bool] = None  # None = 使用全局默认
 
     @field_validator("timeframe")
     @classmethod
@@ -128,6 +130,21 @@ def save_settings(settings: Settings) -> None:
         k: v for k, v in settings.notify.model_dump().items()
         if k not in ("telegram_bot_token", "telegram_chat_id")  # 敏感项不写文件
     }
+    # 持久化合约级策略开关（None 表示使用全局默认，不写入文件）
+    contracts_raw = raw.get("contracts", [])
+    for cfg in settings.contracts:
+        for i, raw_c in enumerate(contracts_raw):
+            if raw_c.get("symbol") == cfg.symbol and raw_c.get("exchange") == cfg.exchange:
+                if cfg.signal_enabled is not None:
+                    contracts_raw[i]["signal_enabled"] = cfg.signal_enabled
+                else:
+                    contracts_raw[i].pop("signal_enabled", None)
+                if cfg.ema_stop_enabled is not None:
+                    contracts_raw[i]["ema_stop_enabled"] = cfg.ema_stop_enabled
+                else:
+                    contracts_raw[i].pop("ema_stop_enabled", None)
+                break
+    raw["contracts"] = contracts_raw
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, sort_keys=False)
 

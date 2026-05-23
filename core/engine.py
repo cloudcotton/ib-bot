@@ -433,6 +433,8 @@ class ContractMonitor:
             "k1": k1.to_dict() if k1 else None,
             "k2": k2.to_dict() if k2 else None,
             "bars_buffered": len(buf.completed),
+            "signal_enabled": self._signal_enabled,
+            "ema_stop_enabled": self._ema_stop_enabled,
             "buy_target": self._buy_target,
             "sell_target": self._sell_target,
             "reversal_qty": self._reversal_qty,
@@ -563,8 +565,14 @@ class TradingEngine:
             notifier=self._notifier,
             cooldown_sec=self.settings.strategy.signal_cooldown_sec,
         )
-        monitor._signal_enabled = self.settings.strategy.signal_enabled
-        monitor._ema_stop_enabled = self.settings.strategy.ema_stop_enabled
+        monitor._signal_enabled = (
+            cfg.signal_enabled if cfg.signal_enabled is not None
+            else self.settings.strategy.signal_enabled
+        )
+        monitor._ema_stop_enabled = (
+            cfg.ema_stop_enabled if cfg.ema_stop_enabled is not None
+            else self.settings.strategy.ema_stop_enabled
+        )
         qty = self.ib_client.get_position(ib_contract.conId)
         avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
         monitor.update_position(qty, avg_cost)
@@ -986,8 +994,6 @@ class TradingEngine:
             "running": self._running,
             "reconnecting": reconnecting,
             "reconnect_attempt": self._reconnect_attempt if reconnecting else 0,
-            "signal_enabled": self.settings.strategy.signal_enabled,
-            "ema_stop_enabled": self.settings.strategy.ema_stop_enabled,
             "account": self.ib_client.get_account_summary(),
             "contracts": [m.get_status() for m in self._monitors.values()],
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1025,24 +1031,34 @@ class TradingEngine:
             "reversal_qty": monitor._reversal_qty,
         }
 
-    async def update_strategy_params(
-        self,
-        cooldown_sec: Optional[int] = None,
-        signal_enabled: Optional[bool] = None,
-        ema_stop_enabled: Optional[bool] = None,
-    ) -> None:
+    async def update_strategy_params(self, cooldown_sec: Optional[int] = None) -> None:
         if cooldown_sec is not None:
             self.settings.strategy.signal_cooldown_sec = cooldown_sec
             for m in self._monitors.values():
                 m._cooldown = cooldown_sec
-        if signal_enabled is not None:
-            self.settings.strategy.signal_enabled = signal_enabled
-            for m in self._monitors.values():
-                m._signal_enabled = signal_enabled
-            logger.info(f"双K止损已{'启用' if signal_enabled else '暂停'}")
-        if ema_stop_enabled is not None:
-            self.settings.strategy.ema_stop_enabled = ema_stop_enabled
-            for m in self._monitors.values():
-                m._ema_stop_enabled = ema_stop_enabled
-            logger.info(f"均线止损已{'启用' if ema_stop_enabled else '暂停'}")
         save_settings(self.settings)
+
+    async def update_contract_strategy_params(
+        self,
+        key: str,
+        signal_enabled: Optional[bool] = None,
+        ema_stop_enabled: Optional[bool] = None,
+    ) -> dict:
+        """更新单个合约的策略开关，并持久化到 config.yaml。"""
+        monitor = self._monitors.get(key)
+        if not monitor:
+            return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
+        if signal_enabled is not None:
+            monitor._signal_enabled = signal_enabled
+            monitor.cfg.signal_enabled = signal_enabled
+            logger.info(f"[{key}] 双K止损已{'启用' if signal_enabled else '暂停'}")
+        if ema_stop_enabled is not None:
+            monitor._ema_stop_enabled = ema_stop_enabled
+            monitor.cfg.ema_stop_enabled = ema_stop_enabled
+            logger.info(f"[{key}] 均线止损已{'启用' if ema_stop_enabled else '暂停'}")
+        save_settings(self.settings)
+        return {
+            "success": True,
+            "signal_enabled": monitor._signal_enabled,
+            "ema_stop_enabled": monitor._ema_stop_enabled,
+        }

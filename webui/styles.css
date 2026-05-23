@@ -398,6 +398,15 @@ section h2 {
 .toggle-label.on   { color: var(--green);  }
 .toggle-label.off  { color: var(--yellow); }
 
+/* ── Compact toggle (card controls) ── */
+.toggle-switch.toggle-xs { width: 34px; height: 18px; }
+.toggle-switch.toggle-xs .toggle-slider::before { width: 12px; height: 12px; left: 2px; bottom: 2px; }
+.toggle-switch.toggle-xs input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+.ctrl-strategy { flex-wrap: wrap; gap: 10px; }
+.ctrl-strategy-item { display: flex; align-items: center; gap: 5px; }
+.ctrl-strategy-name { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }

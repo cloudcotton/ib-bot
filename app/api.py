@@ -13,6 +13,7 @@ from web.schemas import (
     OpenPositionRequest,
     SetReversalRequest,
     SetStaticStopRequest,
+    UpdateContractStrategyRequest,
     UpdateNotifyRequest,
     UpdateStrategyRequest,
 )
@@ -149,12 +150,23 @@ async def set_reversal(body: SetReversalRequest, request: Request):
 @router.post("/params/strategy")
 async def update_strategy(body: UpdateStrategyRequest, request: Request):
     e = _engine(request)
-    await e.update_strategy_params(
-        cooldown_sec=body.signal_cooldown_sec,
+    await e.update_strategy_params(cooldown_sec=body.signal_cooldown_sec)
+    return {"success": True, "strategy": e.settings.strategy.model_dump()}
+
+
+@router.post("/params/contract_strategy")
+async def update_contract_strategy(body: UpdateContractStrategyRequest, request: Request):
+    """更新单个合约的策略开关（双K止损 / 均线止损）。"""
+    e = _engine(request)
+    key = f"{body.symbol}@{body.exchange}"
+    result = await e.update_contract_strategy_params(
+        key=key,
         signal_enabled=body.signal_enabled,
         ema_stop_enabled=body.ema_stop_enabled,
     )
-    return {"success": True, "strategy": e.settings.strategy.model_dump()}
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "设置失败"))
+    return result
 
 
 @router.post("/params/notify")
