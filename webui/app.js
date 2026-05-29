@@ -230,13 +230,30 @@ function buildCardDisplay(c) {
   let emaHTML = '';
   if (c.ema20 != null || c.ema40 != null || c.ema60 != null) {
     const emaStopOn = c.ema_stop_enabled === true;
-    const emaColor = emaStopOn ? 'var(--blue)' : 'var(--text-dim)';
+    const emaRevOn  = c.ema_reversal_enabled === true;
+    const emaColor = (emaStopOn || emaRevOn) ? 'var(--blue)' : 'var(--text-dim)';
     const emaParts = [
       c.ema20 != null ? `EMA20: ${fmt(c.ema20)}` : 'EMA20: —',
       c.ema40 != null ? `EMA40: ${fmt(c.ema40)}` : 'EMA40: —',
       c.ema60 != null ? `EMA60: ${fmt(c.ema60)}` : 'EMA60: —',
     ].join('　');
-    emaHTML = `<div class="reversal-row" style="color:${emaColor};font-size:12px">${emaParts}</div>`;
+    // EMA反转策略状态
+    let revStateHTML = '';
+    if (emaRevOn) {
+      const cp = c.current_price;
+      const zone = (cp != null && c.ema20 != null && c.ema40 != null && c.ema60 != null)
+        ? (cp > Math.max(c.ema20, c.ema40, c.ema60) ? 'LONG'
+           : cp < Math.min(c.ema20, c.ema40, c.ema60) ? 'SHORT' : null)
+        : null;
+      const zoneLabel = zone === 'LONG' ? '<span style="color:var(--green)">多头区间</span>'
+                      : zone === 'SHORT' ? '<span style="color:var(--red)">空头区间</span>'
+                      : '<span style="color:var(--text-dim)">横盘区间</span>';
+      const stateLabel = c.ema_trend_state === 'LONG'  ? '<span style="color:var(--green)">状态:多</span>'
+                       : c.ema_trend_state === 'SHORT' ? '<span style="color:var(--red)">状态:空</span>'
+                       : '<span style="color:var(--text-dim)">状态:—</span>';
+      revStateHTML = `　${zoneLabel}　${stateLabel}`;
+    }
+    emaHTML = `<div class="reversal-row" style="color:${emaColor};font-size:12px">${emaParts}${revStateHTML}</div>`;
   }
 
   const sigOn = c.signal_enabled !== false;
@@ -284,6 +301,7 @@ function buildCardControls(c) {
   const safeId = key.replace('@', '-');
   const sigOn  = c.signal_enabled !== false;
   const emaOn  = c.ema_stop_enabled === true;
+  const revOn  = c.ema_reversal_enabled === true;
   return `
     <div class="card-controls">
       <div class="ctrl-label">策略开关</div>
@@ -306,6 +324,21 @@ function buildCardControls(c) {
           </label>
           <span id="cst-ema-lbl-${safeId}" class="toggle-label ${emaOn ? 'on' : 'off'}">${emaOn ? '已启用' : '已暂停'}</span>
         </span>
+        <span class="ctrl-strategy-item">
+          <span class="ctrl-strategy-name">EMA反转开仓</span>
+          <label class="toggle-switch toggle-xs">
+            <input type="checkbox" id="cst-rev-${safeId}" ${revOn ? 'checked' : ''}
+                   onchange="setContractStrategy('${key}','reversal')" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span id="cst-rev-lbl-${safeId}" class="toggle-label ${revOn ? 'on' : 'off'}">${revOn ? '已启用' : '已暂停'}</span>
+        </span>
+      </div>
+      <div class="ctrl-row" id="cst-rev-qty-row-${safeId}" style="${revOn ? '' : 'display:none'}">
+        <span class="ctrl-strategy-name" style="white-space:nowrap">EMA反转手数</span>
+        <input id="cst-rev-qty-${safeId}" class="ctrl-input ctrl-qty" type="number" min="1" step="1"
+               placeholder="${c.ema_reversal_qty ?? 1}" />
+        <button class="btn btn-xs btn-secondary" onclick="setContractStrategy('${key}','reversal_qty')">确定</button>
       </div>
       <div class="ctrl-label" style="margin-top:4px">抄底 / 摸顶</div>
       <div class="ctrl-row">
@@ -338,14 +371,24 @@ function syncCardControlValues(card, c) {
   // 策略开关同步（以服务端状态为准）
   const sigOn  = c.signal_enabled !== false;
   const emaOn  = c.ema_stop_enabled === true;
+  const revOn  = c.ema_reversal_enabled === true;
   const sigCb  = document.getElementById(`cst-sig-${safeId}`);
   const sigLbl = document.getElementById(`cst-sig-lbl-${safeId}`);
   const emaCb  = document.getElementById(`cst-ema-${safeId}`);
   const emaLbl = document.getElementById(`cst-ema-lbl-${safeId}`);
+  const revCb  = document.getElementById(`cst-rev-${safeId}`);
+  const revLbl = document.getElementById(`cst-rev-lbl-${safeId}`);
+  const revQtyRow = document.getElementById(`cst-rev-qty-row-${safeId}`);
+  const revQtyEl  = document.getElementById(`cst-rev-qty-${safeId}`);
   if (sigCb)  sigCb.checked = sigOn;
   if (sigLbl) { sigLbl.textContent = sigOn ? '已启用' : '已暂停'; sigLbl.className = 'toggle-label ' + (sigOn ? 'on' : 'off'); }
   if (emaCb)  emaCb.checked = emaOn;
   if (emaLbl) { emaLbl.textContent = emaOn ? '已启用' : '已暂停'; emaLbl.className = 'toggle-label ' + (emaOn ? 'on' : 'off'); }
+  if (revCb)  revCb.checked = revOn;
+  if (revLbl) { revLbl.textContent = revOn ? '已启用' : '已暂停'; revLbl.className = 'toggle-label ' + (revOn ? 'on' : 'off'); }
+  if (revQtyRow) revQtyRow.style.display = revOn ? '' : 'none';
+  if (revQtyEl && document.activeElement !== revQtyEl && !revQtyEl.value)
+    revQtyEl.placeholder = `手数 (当前 ${c.ema_reversal_qty ?? 1})`;
 }
 
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
@@ -542,12 +585,27 @@ async function setContractStrategy(key, type) {
     const lbl = document.getElementById(`cst-sig-lbl-${safeId}`);
     if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
     msg = enabled ? '双K止损已启用' : '双K止损已暂停';
-  } else {
+  } else if (type === 'ema') {
     const enabled = document.getElementById(`cst-ema-${safeId}`).checked;
     body.ema_stop_enabled = enabled;
     const lbl = document.getElementById(`cst-ema-lbl-${safeId}`);
     if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
     msg = enabled ? '均线止损已启用' : '均线止损已暂停';
+  } else if (type === 'reversal') {
+    const enabled = document.getElementById(`cst-rev-${safeId}`).checked;
+    body.ema_reversal_enabled = enabled;
+    const lbl = document.getElementById(`cst-rev-lbl-${safeId}`);
+    if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
+    const qtyRow = document.getElementById(`cst-rev-qty-row-${safeId}`);
+    if (qtyRow) qtyRow.style.display = enabled ? '' : 'none';
+    msg = enabled ? 'EMA反转开仓已启用' : 'EMA反转开仓已暂停';
+  } else if (type === 'reversal_qty') {
+    const qtyEl = document.getElementById(`cst-rev-qty-${safeId}`);
+    const qty = parseFloat(qtyEl?.value);
+    if (!qty || qty <= 0) return showMsg(`rc-msg-${safeId}`, '手数必须大于 0', false);
+    body.ema_reversal_qty = qty;
+    msg = `EMA反转手数已更新: ${qty}`;
+    if (qtyEl) qtyEl.value = '';
   }
   await apiCall('/api/params/contract_strategy', body, `rc-msg-${safeId}`, msg);
 }

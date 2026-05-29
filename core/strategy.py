@@ -69,6 +69,24 @@ def check_signal(
     return None
 
 
+def get_ema_zone(buffer: KlineBuffer, close_price: float) -> Optional[str]:
+    """根据价格与 EMA20/40/60 的相对位置判断当前区间。
+
+    Returns:
+        'LONG'  — close > max(EMA20, EMA40, EMA60)
+        'SHORT' — close < min(EMA20, EMA40, EMA60)
+        None    — 横盘区间，或均线尚未就绪
+    """
+    ema20, ema40, ema60 = buffer.ema20, buffer.ema40, buffer.ema60
+    if ema20 is None or ema40 is None or ema60 is None:
+        return None
+    if close_price > max(ema20, ema40, ema60):
+        return "LONG"
+    if close_price < min(ema20, ema40, ema60):
+        return "SHORT"
+    return None
+
+
 def check_ema_signal(
     buffer: KlineBuffer,
     position: float,

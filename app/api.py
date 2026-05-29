@@ -163,6 +163,8 @@ async def update_contract_strategy(body: UpdateContractStrategyRequest, request:
         key=key,
         signal_enabled=body.signal_enabled,
         ema_stop_enabled=body.ema_stop_enabled,
+        ema_reversal_enabled=body.ema_reversal_enabled,
+        ema_reversal_qty=body.ema_reversal_qty,
     )
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "设置失败"))

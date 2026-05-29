@@ -37,8 +37,10 @@ class ContractConfig(BaseModel):
     multiplier: float = 1.0   # 合约乘数（静态配置，优先于 IB 动态返回）
     use_rth: bool = False
     enabled: bool = True
-    signal_enabled: Optional[bool] = None    # None = 使用全局默认
-    ema_stop_enabled: Optional[bool] = None  # None = 使用全局默认
+    signal_enabled: Optional[bool] = None       # None = 使用全局默认
+    ema_stop_enabled: Optional[bool] = None     # None = 使用全局默认
+    ema_reversal_enabled: Optional[bool] = None # None = 使用全局默认
+    ema_reversal_qty: Optional[float] = None    # None = 使用全局默认
 
     @field_validator("timeframe")
     @classmethod
@@ -57,6 +59,8 @@ class StrategyConfig(BaseModel):
     signal_enabled: bool = True      # 双K止损信号总开关
     signal_cooldown_sec: int = 30
     ema_stop_enabled: bool = False   # 均线止损（EMA20/40/60）总开关
+    ema_reversal_enabled: bool = False  # EMA反转开仓策略总开关
+    ema_reversal_qty: float = 1.0       # EMA反转开仓默认手数
 
 
 class NotifyConfig(BaseModel):
@@ -143,6 +147,14 @@ def save_settings(settings: Settings) -> None:
                     contracts_raw[i]["ema_stop_enabled"] = cfg.ema_stop_enabled
                 else:
                     contracts_raw[i].pop("ema_stop_enabled", None)
+                if cfg.ema_reversal_enabled is not None:
+                    contracts_raw[i]["ema_reversal_enabled"] = cfg.ema_reversal_enabled
+                else:
+                    contracts_raw[i].pop("ema_reversal_enabled", None)
+                if cfg.ema_reversal_qty is not None:
+                    contracts_raw[i]["ema_reversal_qty"] = cfg.ema_reversal_qty
+                else:
+                    contracts_raw[i].pop("ema_reversal_qty", None)
                 break
     raw["contracts"] = contracts_raw
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
