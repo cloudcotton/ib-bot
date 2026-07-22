@@ -453,6 +453,55 @@ class IBClient:
         self.ib.placeOrder(trade.contract, trade.order)
         logger.info(f"修改止损价: orderId={trade.order.orderId} → {new_stop_price}")
 
+    # ── 挂单查询与撤单 ────────────────────────────────────────────────────
+
+    def get_open_orders(self) -> list[dict]:
+        """查询当前 session 所有活跃挂单（ib.openTrades() 快照）。
+
+        返回字段：order_id, symbol, exchange, action, order_type,
+                  qty, filled, remaining, price, status, parent_id
+        """
+        result = []
+        for t in self.ib.openTrades():
+            order    = t.order
+            contract = t.contract
+            status   = t.orderStatus.status
+
+            lmt = getattr(order, "lmtPrice", 0) or 0
+            aux = getattr(order, "auxPrice",  0) or 0
+            price = round(lmt, 4) if lmt > 0 else (round(aux, 4) if aux > 0 else None)
+
+            parent_id = getattr(order, "parentId", 0) or 0
+
+            result.append({
+                "order_id":   order.orderId,
+                "symbol":     contract.symbol,
+                "exchange":   contract.exchange,
+                "action":     order.action,
+                "order_type": order.orderType,
+                "qty":        float(order.totalQuantity),
+                "filled":     float(t.orderStatus.filled),
+                "remaining":  float(t.orderStatus.remaining),
+                "price":      price,
+                "status":     status,
+                "parent_id":  parent_id if parent_id > 0 else None,
+            })
+        return result
+
+    def cancel_order_by_id(self, order_id: int) -> bool:
+        """按 orderId 撤销挂单，找不到时返回 False。"""
+        for trade in self.ib.openTrades():
+            if trade.order.orderId == order_id:
+                try:
+                    self.ib.cancelOrder(trade.order)
+                    logger.info(f"撤单已发送: orderId={order_id}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"撤单失败 orderId={order_id}: {e}")
+                    return False
+        logger.warning(f"未找到挂单 orderId={order_id}")
+        return False
+
     # ── 市价平仓 ──────────────────────────────────────────────────────────
 
     async def close_position(

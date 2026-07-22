@@ -1,3 +1,5 @@
+archive_*.txt
+archive_*.tar.gz
 venv/
 .venv/
 __pycache__/

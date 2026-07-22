@@ -648,3 +648,71 @@ function showMsg(id, text, ok) {
   el.className = 'msg ' + (ok ? 'ok' : 'err');
   setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, 5000);
 }
+
+// ── 挂单查询与撤单（按需触发，无轮询）────────────────────────────────
+async function refreshOpenOrders() {
+  const listEl = document.getElementById('open-orders-list');
+  const updEl  = document.getElementById('orders-last-updated');
+  listEl.innerHTML = '<div class="orders-empty">查询中…</div>';
+  updEl.textContent = '';
+  try {
+    const res  = await fetch('/api/orders/open');
+    const data = await res.json();
+    if (!res.ok) {
+      listEl.innerHTML = '';
+      showMsg('orders-msg', data.detail || '查询失败', false);
+      return;
+    }
+    updEl.textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN')}（共 ${data.count} 笔）`;
+    renderOpenOrders(data.orders);
+  } catch (e) {
+    listEl.innerHTML = '';
+    showMsg('orders-msg', `网络错误: ${e.message}`, false);
+  }
+}
+
+function renderOpenOrders(orders) {
+  const el = document.getElementById('open-orders-list');
+  if (!orders || !orders.length) {
+    el.innerHTML = '<div class="orders-empty">当前无挂单</div>';
+    return;
+  }
+  el.innerHTML = orders.map(o => {
+    const sideClass = o.action === 'BUY' ? 'buy' : 'sell';
+    const qtyStr    = o.remaining === o.qty
+      ? `${o.qty}手`
+      : `${o.remaining}/${o.qty}手`;
+    const childTag  = o.parent_id
+      ? `<small class="order-child-tag">子单↑${o.parent_id}</small>`
+      : '';
+    return `
+      <div class="order-row">
+        <span class="order-symbol">${o.symbol}<small>@${o.exchange}</small>${childTag}</span>
+        <span class="order-side ${sideClass}">${o.action}</span>
+        <span class="order-type">${o.order_type}</span>
+        <span class="order-qty">${qtyStr}</span>
+        <span class="order-price">${fmt(o.price)}</span>
+        <span class="order-status">${o.status}</span>
+        <button class="btn btn-xs btn-danger" onclick="cancelOrder(${o.order_id})">撤单</button>
+      </div>`;
+  }).join('');
+}
+
+async function cancelOrder(orderId) {
+  try {
+    const res  = await fetch('/api/orders/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showMsg('orders-msg', `撤单已发送 (orderId=${orderId})`, true);
+      setTimeout(refreshOpenOrders, 800);  // 稍等 IB 侧响应后刷新列表
+    } else {
+      showMsg('orders-msg', data.detail || '撤单失败', false);
+    }
+  } catch (e) {
+    showMsg('orders-msg', `网络错误: ${e.message}`, false);
+  }
+}

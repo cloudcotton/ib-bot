@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 
 from web.schemas import (
+    CancelOrderRequest,
     CancelStaticStopRequest,
     HealthResponse,
     ManualCloseRequest,
@@ -188,6 +189,27 @@ async def update_notify(body: UpdateNotifyRequest, request: Request):
         e._notifier._chat_id = nc.telegram_chat_id
         e._notifier._min_interval = nc.min_interval_sec
     return {"success": True}
+
+
+# ── 挂单管理 ──────────────────────────────────────────────────────────────
+
+
+@router.get("/orders/open")
+async def get_open_orders(request: Request):
+    """查询当前账户所有活跃挂单（按需触发，无轮询）。"""
+    result = _engine(request).get_open_orders()
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "查询挂单失败"))
+    return result
+
+
+@router.post("/orders/cancel")
+async def cancel_order(body: CancelOrderRequest, request: Request):
+    """按 orderId 撤销挂单。"""
+    result = _engine(request).cancel_order_by_id(body.order_id)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "撤单失败"))
+    return result
 
 
 @router.post("/notify/test")

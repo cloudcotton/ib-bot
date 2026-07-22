@@ -407,6 +407,46 @@ section h2 {
 .ctrl-strategy-item { display: flex; align-items: center; gap: 5px; }
 .ctrl-strategy-name { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 
+/* ── Open Orders ── */
+.panel-wide { max-width: 100%; }
+
+.orders-meta {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+.orders-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.order-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.order-row:last-child { border-bottom: none; }
+.order-row:hover { background: rgba(59,130,246,.05); border-radius: 4px; }
+
+.order-symbol { font-weight: 600; min-width: 90px; }
+.order-symbol small { font-weight: 400; color: var(--text-dim); font-size: 11px; margin-left: 2px; }
+.order-child-tag { display: block; font-size: 10px; color: var(--text-dim); font-weight: 400; }
+
+.order-side { font-weight: 700; min-width: 36px; }
+.order-side.buy  { color: var(--green); }
+.order-side.sell { color: var(--red);   }
+
+.order-type   { color: var(--text-dim); font-size: 12px; min-width: 36px; }
+.order-qty    { font-variant-numeric: tabular-nums; min-width: 52px; }
+.order-price  { font-variant-numeric: tabular-nums; min-width: 74px; color: var(--yellow); font-weight: 600; }
+.order-status { font-size: 11px; color: var(--text-dim); flex: 1; min-width: 84px; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }

@@ -1007,6 +1007,26 @@ class TradingEngine:
         )
         return {"success": success}
 
+    # ── 挂单查询与撤单 ─────────────────────────────────────────────────────
+
+    def get_open_orders(self) -> dict:
+        if not self.ib_client.is_connected:
+            return {"success": False, "error": "IB 未连接"}
+        try:
+            orders = self.ib_client.get_open_orders()
+            return {"success": True, "orders": orders, "count": len(orders)}
+        except Exception as e:
+            logger.error(f"查询挂单异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    def cancel_order_by_id(self, order_id: int) -> dict:
+        if not self.ib_client.is_connected:
+            return {"success": False, "error": "IB 未连接"}
+        ok = self.ib_client.cancel_order_by_id(order_id)
+        if ok:
+            return {"success": True, "order_id": order_id}
+        return {"success": False, "error": f"未找到挂单或撤单失败 orderId={order_id}"}
+
     # ── 断线重连 ───────────────────────────────────────────────────────────
 
     def _on_disconnected(self) -> None:

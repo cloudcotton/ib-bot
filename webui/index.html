@@ -114,6 +114,19 @@
       </div>
     </section>
 
+    <!-- ── 挂单管理 ── -->
+    <section>
+      <h2>挂单管理</h2>
+      <div class="panel panel-wide">
+        <div class="form-row">
+          <button class="btn btn-secondary" onclick="refreshOpenOrders()">🔄 查询挂单</button>
+          <span id="orders-last-updated" class="orders-meta"></span>
+        </div>
+        <div id="open-orders-list"></div>
+        <div id="orders-msg" class="msg"></div>
+      </div>
+    </section>
+
     <!-- ── 静态止损管理 ── -->
     <section>
       <h2>静态止损</h2>

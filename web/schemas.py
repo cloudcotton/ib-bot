@@ -65,6 +65,10 @@ class SetReversalRequest(BaseModel):
     qty: Optional[float] = None          # None=不变, >0=更新开仓手数
 
 
+class CancelOrderRequest(BaseModel):
+    order_id: int
+
+
 class UpdateNotifyRequest(BaseModel):
     enabled: Optional[bool] = None
     telegram_bot_token: Optional[str] = None
