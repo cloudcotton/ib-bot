@@ -764,7 +764,7 @@ class TradingEngine:
         stop_ticks: Optional[int] = None,
         tp_ticks: Optional[int] = None,
     ) -> dict:
-        """开仓。仅限价单支持止损/止盈 Ticks：按 limit_price ± ticks*min_tick 立即挂单。"""
+        """开仓。限价单有止损/止盈时使用 IB Bracket 组合单；其余情况独立下单。"""
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
@@ -787,28 +787,74 @@ class TradingEngine:
                 else:
                     take_profit_price = round(limit_price - tp_ticks * min_tick, 4)
 
+        use_bracket = (
+            order_type == "limit"
+            and limit_price is not None
+            and (stop_price is not None or take_profit_price is not None)
+        )
+
         try:
-            trade = self.ib_client.open_position(
-                contract=monitor.contract,
-                direction=direction,
-                qty=qty,
-                order_type=order_type,
-                limit_price=limit_price,
-            )
+            if use_bracket:
+                # 撤销旧止损/止盈单，以 Bracket 组合单替代（OCA 绑定）
+                await monitor._cancel_stop_order()
+                await monitor._cancel_tp_order()
+
+                parent_trade, stop_trade, tp_trade = self.ib_client.place_bracket_order(
+                    contract=monitor.contract,
+                    direction=direction,
+                    qty=qty,
+                    limit_price=limit_price,
+                    stop_price=stop_price,
+                    take_profit_price=take_profit_price,
+                )
+
+                if stop_trade is not None:
+                    monitor._stop_trade = stop_trade
+                    monitor._stop_price = stop_price
+
+                    def on_stop_filled(t):
+                        fill = t.orderStatus.avgFillPrice
+                        logger.info(f"[{key}] IB 止损单触发 @ {fill}")
+                        monitor._stop_trade = None
+                        monitor._stop_price = None
+                        if self._notifier:
+                            self._notifier.send(
+                                f"🛑 <b>止损触发（IB 执行）</b>\n"
+                                f"合约: <code>{monitor.cfg.symbol}@{monitor.cfg.exchange}</code>\n"
+                                f"成交价: {fill}"
+                            )
+
+                    stop_trade.filledEvent += on_stop_filled
+
+                if tp_trade is not None:
+                    monitor._tp_trade = tp_trade
+                    monitor._tp_price = take_profit_price
+
+                    def on_tp_filled(t):
+                        fill = t.orderStatus.avgFillPrice
+                        logger.info(f"[{key}] IB 止盈单触发 @ {fill}")
+                        monitor._tp_trade = None
+                        monitor._tp_price = None
+                        if self._notifier:
+                            self._notifier.send(
+                                f"✅ <b>止盈触发（IB 执行）</b>\n"
+                                f"合约: <code>{monitor.cfg.symbol}@{monitor.cfg.exchange}</code>\n"
+                                f"成交价: {fill}"
+                            )
+
+                    tp_trade.filledEvent += on_tp_filled
+
+                trade = parent_trade
+            else:
+                trade = self.ib_client.open_position(
+                    contract=monitor.contract,
+                    direction=direction,
+                    qty=qty,
+                    order_type=order_type,
+                    limit_price=limit_price,
+                )
         except Exception as e:
             return {"success": False, "error": str(e)}
-
-        # 限价单：立即提交止损/止盈单，不等待主单成交
-        if stop_price is not None:
-            _safe_ensure_future(
-                self._submit_stop(monitor, direction, qty, stop_price),
-                label=f"{key} _submit_stop",
-            )
-        if take_profit_price is not None:
-            _safe_ensure_future(
-                self._submit_take_profit(monitor, direction, qty, take_profit_price),
-                label=f"{key} _submit_take_profit",
-            )
 
         return {
             "success": True,

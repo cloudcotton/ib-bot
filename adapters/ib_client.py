@@ -345,6 +345,64 @@ class IBClient:
                     + (f" @ {limit_price}" if limit_price else ""))
         return self.ib.placeOrder(contract, order)
 
+    def place_bracket_order(
+        self,
+        contract,
+        direction: str,
+        qty: float,
+        limit_price: float,
+        stop_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
+    ):
+        """提交限价开仓 Bracket 组合单（手动绑定 parentId，不使用 ib.bracketOrder()）。
+
+        支持仅SL、仅TP或两者均有三种场景。
+        最后一个子单 transmit=True 触发整组同步发出，父单及其余子单 transmit=False。
+
+        返回 (parent_trade, stop_trade, tp_trade)，stop_trade/tp_trade 为 None 表示未设置。
+        """
+        action = "BUY" if direction == "long" else "SELL"
+        close_action = "SELL" if direction == "long" else "BUY"
+
+        parent = LimitOrder(action, qty, limit_price)
+        parent.orderId = self.ib.client.getReqId()
+        parent.transmit = False
+
+        child_specs: list[tuple[str, object]] = []
+        if stop_price is not None:
+            stop = StopOrder(close_action, qty, stop_price)
+            stop.parentId = parent.orderId
+            stop.transmit = False
+            child_specs.append(("stop", stop))
+        if take_profit_price is not None:
+            tp = LimitOrder(close_action, qty, take_profit_price)
+            tp.parentId = parent.orderId
+            tp.transmit = False
+            child_specs.append(("tp", tp))
+
+        # 最后一个子单 transmit=True，触发整组一起发出
+        if child_specs:
+            child_specs[-1][1].transmit = True
+        else:
+            parent.transmit = True
+
+        parent_trade = self.ib.placeOrder(contract, parent)
+        stop_trade = None
+        tp_trade = None
+        for kind, order in child_specs:
+            t = self.ib.placeOrder(contract, order)
+            if kind == "stop":
+                stop_trade = t
+            else:
+                tp_trade = t
+
+        logger.info(
+            f"Bracket单: {contract.symbol} {action} {qty} LMT@{limit_price}"
+            + (f" SL@{stop_price}" if stop_price else "")
+            + (f" TP@{take_profit_price}" if take_profit_price else "")
+        )
+        return parent_trade, stop_trade, tp_trade
+
     # ── 止损单管理 ────────────────────────────────────────────────────────
 
     def place_stop_order(
