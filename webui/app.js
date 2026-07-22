@@ -469,6 +469,9 @@ async function submitTrade() {
       const data = await res.json();
       if (!res.ok) { showMsg('trade-msg', data.detail || '开仓失败', false); return; }
 
+      // 限价单成功后自动刷新挂单列表
+      if (_orderType === 'limit') setTimeout(refreshOpenOrders, 500);
+
       // 开仓联动止损
       const autoStop = document.getElementById('trade-auto-stop')?.checked;
       if (autoStop) {
