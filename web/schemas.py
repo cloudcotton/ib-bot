@@ -18,8 +18,8 @@ class OpenPositionRequest(BaseModel):
     qty: float
     order_type: str = "market"   # "market" | "limit"
     limit_price: Optional[float] = None
-    stop_price: Optional[float] = None
-    take_profit_price: Optional[float] = None
+    stop_ticks: Optional[int] = None       # 止损 Ticks（仅限价单有效）
+    tp_ticks: Optional[int] = None         # 止盈 Ticks（仅限价单有效）
 
 
 class ManualCloseRequest(BaseModel):

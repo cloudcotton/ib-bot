@@ -71,8 +71,8 @@ async def open_position(body: OpenPositionRequest, request: Request):
         qty=body.qty,
         order_type=body.order_type,
         limit_price=body.limit_price,
-        stop_price=body.stop_price,
-        take_profit_price=body.take_profit_price,
+        stop_ticks=body.stop_ticks,
+        tp_ticks=body.tp_ticks,
     )
     if not result.get("success"):
         raise HTTPException(400, result.get("error", "开仓失败"))

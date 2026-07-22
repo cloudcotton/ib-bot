@@ -35,6 +35,7 @@ class ContractConfig(BaseModel):
     expiry: str = ""          # "" = 自动取主力合约；"202506" = 强制指定到期月
     roll_days: int = 7        # 到期前多少天自动切换到下一合约（仅 expiry="" 时有效）
     multiplier: float = 1.0   # 合约乘数（静态配置，优先于 IB 动态返回）
+    min_tick: float = 0.01    # 最小价格变动单位（用于止损/止盈 Ticks 计算）
     use_rth: bool = False
     enabled: bool = True
     signal_enabled: Optional[bool] = None       # None = 使用全局默认

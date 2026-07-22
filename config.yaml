@@ -23,6 +23,7 @@ contracts:
     expiry: ""
     roll_days: 7
     multiplier: 50        # 固定合约乘数，避免 IB 接口瞬时异常导致均价失真
+    min_tick: 0.25        # 最小价格变动单位（Tick Size）
     use_rth: false        # false = 监控全时段 (适合几乎 23 小时交易的美指期货)
     enabled: true
 
@@ -33,6 +34,7 @@ contracts:
     expiry: ""
     roll_days: 7
     multiplier: 5
+    min_tick: 0.25
     use_rth: false
     enabled: true        # 默认关闭，按需启用
 
@@ -43,6 +45,7 @@ contracts:
     expiry: ""
     roll_days: 3          # 月度合约到期前 3 天自动切换
     multiplier: 50
+    min_tick: 1.0
     use_rth: true         # true = 仅正常交易时段（港股期货有午休）
     enabled: true
 
@@ -53,6 +56,7 @@ contracts:
     expiry: ""
     roll_days: 3          # 月度合约到期前 3 天自动切换
     multiplier: 10
+    min_tick: 1.0
     use_rth: true
     enabled: true
 
@@ -63,6 +67,7 @@ contracts:
     expiry: ""
     roll_days: 7
     multiplier: 20
+    min_tick: 0.25
     use_rth: false
     enabled: true
 
@@ -73,6 +78,7 @@ contracts:
     expiry: ""
     roll_days: 7
     multiplier: 2
+    min_tick: 0.25
     use_rth: false
     enabled: false        # 暂时关闭：IB Tick 订阅上限为 5，待申请提额后重新开启
 

@@ -568,6 +568,7 @@ class ContractMonitor:
             "k1": k1.to_dict() if k1 else None,
             "k2": k2.to_dict() if k2 else None,
             "bars_buffered": len(buf.completed),
+            "min_tick": self.cfg.min_tick,
             "signal_enabled": self._signal_enabled,
             "ema_stop_enabled": self._ema_stop_enabled,
             "ema_reversal_enabled": self._ema_reversal_enabled,
@@ -760,15 +761,31 @@ class TradingEngine:
         qty: float,
         order_type: str,
         limit_price: Optional[float] = None,
-        stop_price: Optional[float] = None,
-        take_profit_price: Optional[float] = None,
+        stop_ticks: Optional[int] = None,
+        tp_ticks: Optional[int] = None,
     ) -> dict:
-        """开仓，可同时设置止损价/止盈价（开仓成交后自动挂 IB 对应单）。"""
+        """开仓。仅限价单支持止损/止盈 Ticks：按 limit_price ± ticks*min_tick 立即挂单。"""
         monitor = self._monitors.get(key)
         if not monitor:
             return {"success": False, "error": f"合约 {key!r} 不在监控列表中"}
         if not self.ib_client.is_connected:
             return {"success": False, "error": "IB 未连接"}
+
+        # 仅限价单计算止损/止盈绝对价格（市价单忽略 ticks 参数）
+        stop_price: Optional[float] = None
+        take_profit_price: Optional[float] = None
+        if order_type == "limit" and limit_price is not None:
+            min_tick = monitor.cfg.min_tick
+            if stop_ticks and stop_ticks > 0:
+                if direction == "long":
+                    stop_price = round(limit_price - stop_ticks * min_tick, 4)
+                else:
+                    stop_price = round(limit_price + stop_ticks * min_tick, 4)
+            if tp_ticks and tp_ticks > 0:
+                if direction == "long":
+                    take_profit_price = round(limit_price + tp_ticks * min_tick, 4)
+                else:
+                    take_profit_price = round(limit_price - tp_ticks * min_tick, 4)
 
         try:
             trade = self.ib_client.open_position(
@@ -781,28 +798,17 @@ class TradingEngine:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-        # 成交后挂止损单和/或止盈单
-        if stop_price is not None or take_profit_price is not None:
-            _stop_price = stop_price
-            _tp_price = take_profit_price
-            _direction = direction
-            _qty = qty
-
-            def on_entry_filled(t):
-                fill = t.orderStatus.avgFillPrice
-                logger.info(f"[{key}] 开仓成交: {_direction} {_qty} @ {fill}")
-                if _stop_price is not None:
-                    _safe_ensure_future(
-                        self._submit_stop(monitor, _direction, _qty, _stop_price),
-                        label=f"{key} _submit_stop",
-                    )
-                if _tp_price is not None:
-                    _safe_ensure_future(
-                        self._submit_take_profit(monitor, _direction, _qty, _tp_price),
-                        label=f"{key} _submit_take_profit",
-                    )
-
-            trade.filledEvent += on_entry_filled
+        # 限价单：立即提交止损/止盈单，不等待主单成交
+        if stop_price is not None:
+            _safe_ensure_future(
+                self._submit_stop(monitor, direction, qty, stop_price),
+                label=f"{key} _submit_stop",
+            )
+        if take_profit_price is not None:
+            _safe_ensure_future(
+                self._submit_take_profit(monitor, direction, qty, take_profit_price),
+                label=f"{key} _submit_take_profit",
+            )
 
         return {
             "success": True,

@@ -16,10 +16,11 @@ function setAction(a) {
   _action = a;
   document.getElementById('btn-open').classList.toggle('active', a === 'open');
   document.getElementById('btn-close').classList.toggle('active', a === 'close');
-  // 平仓时不需要止损价、止盈价、位移、联动止损
+  // 止损/止盈 Ticks 仅在开仓+限价单时可用；位移、联动止损仅在开仓时可用
   const isOpen = a === 'open';
-  document.getElementById('row-stop-price').style.display  = isOpen ? 'flex' : 'none';
-  document.getElementById('row-tp-price').style.display    = isOpen ? 'flex' : 'none';
+  const showStopTp = isOpen && _orderType === 'limit';
+  document.getElementById('row-stop-price').style.display  = showStopTp ? 'flex' : 'none';
+  document.getElementById('row-tp-price').style.display    = showStopTp ? 'flex' : 'none';
   document.getElementById('row-offset').style.display      = isOpen ? 'flex' : 'none';
   document.getElementById('row-auto-stop').style.display   = isOpen ? 'flex' : 'none';
 }
@@ -44,6 +45,10 @@ function setOrderType(t) {
   document.getElementById('btn-mkt').classList.toggle('active', t === 'market');
   document.getElementById('btn-lmt').classList.toggle('active', t === 'limit');
   document.getElementById('row-limit-price').style.display = t === 'limit' ? 'flex' : 'none';
+  // 止损/止盈 Ticks 仅限价单可用
+  const showStopTp = _action === 'open' && t === 'limit';
+  document.getElementById('row-stop-price').style.display  = showStopTp ? 'flex' : 'none';
+  document.getElementById('row-tp-price').style.display    = showStopTp ? 'flex' : 'none';
 }
 
 // ── 数据轮询 ──────────────────────────────────────────────────────────────
@@ -441,16 +446,18 @@ async function submitTrade() {
       }
     }
 
-    const sp = parseFloat(document.getElementById('trade-stop-price').value);
-    if (sp) body.stop_price = sp;
-
-    const tp = parseFloat(document.getElementById('trade-tp-price').value);
-    if (tp) body.take_profit_price = tp;
+    // 止损/止盈 Ticks 仅限价单有效，市价单忽略
+    if (_orderType === 'limit') {
+      const st = parseInt(document.getElementById('trade-stop-ticks').value);
+      if (st > 0) body.stop_ticks = st;
+      const tt = parseInt(document.getElementById('trade-tp-ticks').value);
+      if (tt > 0) body.tp_ticks = tt;
+    }
 
     const dir = _direction === 'long' ? '多' : '空';
     const lpLabel = body.limit_price ? `@${body.limit_price}` : '';
     const typeLabel = _orderType === 'market' ? '市价' : `限价${lpLabel}`;
-    const extra = [sp ? '止损@' + sp : '', tp ? '止盈@' + tp : ''].filter(Boolean).join(' ');
+    const extra = [body.stop_ticks ? `止损${body.stop_ticks}T` : '', body.tp_ticks ? `止盈${body.tp_ticks}T` : ''].filter(Boolean).join(' ');
 
     // 发送开仓请求（手动 fetch，以便根据结果决定是否追加联动止损）
     try {
