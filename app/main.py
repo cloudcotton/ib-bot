@@ -11,12 +11,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import router as api_router
@@ -70,13 +71,27 @@ def create_app() -> FastAPI:
     if _WEBUI_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(_WEBUI_DIR)), name="static")
 
-    # 根路由 → Web 控制台
+    # 根路由 → Web 控制台（注入静态资源哈希，实现 cache busting）
     @app.get("/", include_in_schema=False)
     async def index():
-        html = _WEBUI_DIR / "index.html"
-        if html.exists():
-            return FileResponse(str(html))
-        return {"message": "IB Bot is running"}
+        html_path = _WEBUI_DIR / "index.html"
+        if not html_path.exists():
+            return {"message": "IB Bot is running"}
+
+        def _hash(name: str) -> str:
+            p = _WEBUI_DIR / name
+            return hashlib.md5(p.read_bytes()).hexdigest()[:8] if p.exists() else "0"
+
+        content = html_path.read_text(encoding="utf-8")
+        content = content.replace(
+            'href="/static/styles.css"',
+            f'href="/static/styles.css?v={_hash("styles.css")}"',
+        )
+        content = content.replace(
+            'src="/static/app.js"',
+            f'src="/static/app.js?v={_hash("app.js")}"',
+        )
+        return HTMLResponse(content)
 
     return app
 
