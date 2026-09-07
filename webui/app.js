@@ -261,6 +261,25 @@ function buildCardDisplay(c) {
     emaHTML = `<div class="reversal-row" style="color:${emaColor};font-size:12px">${emaParts}${revStateHTML}</div>`;
   }
 
+  // MACD（EMA12/26）展示行
+  let macdHTML = '';
+  if (c.ema12 != null || c.ema26 != null) {
+    const macdOn = c.macd_stop_enabled === true;
+    const macdColor = macdOn ? 'var(--purple)' : 'var(--text-dim)';
+    const e12 = c.ema12 != null ? fmt(c.ema12) : '—';
+    const e26 = c.ema26 != null ? fmt(c.ema26) : '—';
+    let macdState = '';
+    if (c.ema12 != null && c.ema26 != null) {
+      if (c.ema12 > c.ema26)
+        macdState = `　<span style="color:var(--green)">金叉 (多头)</span>`;
+      else if (c.ema12 < c.ema26)
+        macdState = `　<span style="color:var(--red)">死叉 (空头)</span>`;
+      else
+        macdState = `　<span style="color:var(--text-dim)">持平</span>`;
+    }
+    macdHTML = `<div class="reversal-row" style="color:${macdColor};font-size:12px">EMA12: ${e12}　EMA26: ${e26}${macdState}</div>`;
+  }
+
   const sigOn = c.signal_enabled !== false;
   const sigText = sigOn ? (c.last_signal || '—') : '已暂停';
   const sigClass = !sigOn ? 'signal-paused' :
@@ -289,6 +308,7 @@ function buildCardDisplay(c) {
       ${reversalHTML}
       ${klineHTML}
       ${emaHTML}
+      ${macdHTML}
       <div class="signal-row ${sigClass}">双K止损信号: ${sigText}${sigTime}</div>
     </div>`;
 }
@@ -302,11 +322,12 @@ function klineCell(label, val, color, d = 2) {
 
 // buildCardControls — 只建一次的控制区（策略开关 + 抄底/摸顶）
 function buildCardControls(c) {
-  const key    = `${c.symbol}@${c.exchange}`;
-  const safeId = key.replace('@', '-');
-  const sigOn  = c.signal_enabled !== false;
-  const emaOn  = c.ema_stop_enabled === true;
-  const revOn  = c.ema_reversal_enabled === true;
+  const key     = `${c.symbol}@${c.exchange}`;
+  const safeId  = key.replace('@', '-');
+  const sigOn   = c.signal_enabled !== false;
+  const emaOn   = c.ema_stop_enabled === true;
+  const revOn   = c.ema_reversal_enabled === true;
+  const macdOn  = c.macd_stop_enabled === true;
   return `
     <div class="card-controls">
       <div class="ctrl-label">策略开关</div>
@@ -328,6 +349,15 @@ function buildCardControls(c) {
             <span class="toggle-slider"></span>
           </label>
           <span id="cst-ema-lbl-${safeId}" class="toggle-label ${emaOn ? 'on' : 'off'}">${emaOn ? '已启用' : '已暂停'}</span>
+        </span>
+        <span class="ctrl-strategy-item">
+          <span class="ctrl-strategy-name">MACD止损</span>
+          <label class="toggle-switch toggle-xs">
+            <input type="checkbox" id="cst-macd-${safeId}" ${macdOn ? 'checked' : ''}
+                   onchange="setContractStrategy('${key}','macd')" />
+            <span class="toggle-slider"></span>
+          </label>
+          <span id="cst-macd-lbl-${safeId}" class="toggle-label ${macdOn ? 'on' : 'off'}">${macdOn ? '已启用' : '已暂停'}</span>
         </span>
         <span class="ctrl-strategy-item">
           <span class="ctrl-strategy-name">EMA反转开仓</span>
@@ -376,21 +406,26 @@ function syncCardControlValues(card, c) {
   // 策略开关同步（以服务端状态为准）
   const sigOn  = c.signal_enabled !== false;
   const emaOn  = c.ema_stop_enabled === true;
+  const macdOn = c.macd_stop_enabled === true;
   const revOn  = c.ema_reversal_enabled === true;
-  const sigCb  = document.getElementById(`cst-sig-${safeId}`);
-  const sigLbl = document.getElementById(`cst-sig-lbl-${safeId}`);
-  const emaCb  = document.getElementById(`cst-ema-${safeId}`);
-  const emaLbl = document.getElementById(`cst-ema-lbl-${safeId}`);
-  const revCb  = document.getElementById(`cst-rev-${safeId}`);
-  const revLbl = document.getElementById(`cst-rev-lbl-${safeId}`);
+  const sigCb   = document.getElementById(`cst-sig-${safeId}`);
+  const sigLbl  = document.getElementById(`cst-sig-lbl-${safeId}`);
+  const emaCb   = document.getElementById(`cst-ema-${safeId}`);
+  const emaLbl  = document.getElementById(`cst-ema-lbl-${safeId}`);
+  const macdCb  = document.getElementById(`cst-macd-${safeId}`);
+  const macdLbl = document.getElementById(`cst-macd-lbl-${safeId}`);
+  const revCb   = document.getElementById(`cst-rev-${safeId}`);
+  const revLbl  = document.getElementById(`cst-rev-lbl-${safeId}`);
   const revQtyRow = document.getElementById(`cst-rev-qty-row-${safeId}`);
   const revQtyEl  = document.getElementById(`cst-rev-qty-${safeId}`);
-  if (sigCb)  sigCb.checked = sigOn;
-  if (sigLbl) { sigLbl.textContent = sigOn ? '已启用' : '已暂停'; sigLbl.className = 'toggle-label ' + (sigOn ? 'on' : 'off'); }
-  if (emaCb)  emaCb.checked = emaOn;
-  if (emaLbl) { emaLbl.textContent = emaOn ? '已启用' : '已暂停'; emaLbl.className = 'toggle-label ' + (emaOn ? 'on' : 'off'); }
-  if (revCb)  revCb.checked = revOn;
-  if (revLbl) { revLbl.textContent = revOn ? '已启用' : '已暂停'; revLbl.className = 'toggle-label ' + (revOn ? 'on' : 'off'); }
+  if (sigCb)   sigCb.checked  = sigOn;
+  if (sigLbl)  { sigLbl.textContent  = sigOn  ? '已启用' : '已暂停'; sigLbl.className  = 'toggle-label ' + (sigOn  ? 'on' : 'off'); }
+  if (emaCb)   emaCb.checked  = emaOn;
+  if (emaLbl)  { emaLbl.textContent  = emaOn  ? '已启用' : '已暂停'; emaLbl.className  = 'toggle-label ' + (emaOn  ? 'on' : 'off'); }
+  if (macdCb)  macdCb.checked = macdOn;
+  if (macdLbl) { macdLbl.textContent = macdOn ? '已启用' : '已暂停'; macdLbl.className = 'toggle-label ' + (macdOn ? 'on' : 'off'); }
+  if (revCb)   revCb.checked  = revOn;
+  if (revLbl)  { revLbl.textContent  = revOn  ? '已启用' : '已暂停'; revLbl.className  = 'toggle-label ' + (revOn  ? 'on' : 'off'); }
   if (revQtyRow) revQtyRow.style.display = revOn ? '' : 'none';
   if (revQtyEl && document.activeElement !== revQtyEl && !revQtyEl.value)
     revQtyEl.placeholder = `手数 (当前 ${c.ema_reversal_qty ?? 1})`;
@@ -601,6 +636,12 @@ async function setContractStrategy(key, type) {
     const lbl = document.getElementById(`cst-ema-lbl-${safeId}`);
     if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
     msg = enabled ? '均线止损已启用' : '均线止损已暂停';
+  } else if (type === 'macd') {
+    const enabled = document.getElementById(`cst-macd-${safeId}`).checked;
+    body.macd_stop_enabled = enabled;
+    const lbl = document.getElementById(`cst-macd-lbl-${safeId}`);
+    if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
+    msg = enabled ? 'MACD止损已启用' : 'MACD止损已暂停';
   } else if (type === 'reversal') {
     const enabled = document.getElementById(`cst-rev-${safeId}`).checked;
     body.ema_reversal_enabled = enabled;

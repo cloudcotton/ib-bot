@@ -55,6 +55,7 @@ class UpdateContractStrategyRequest(BaseModel):
     ema_stop_enabled: Optional[bool] = None
     ema_reversal_enabled: Optional[bool] = None
     ema_reversal_qty: Optional[float] = None
+    macd_stop_enabled: Optional[bool] = None
 
 
 class SetReversalRequest(BaseModel):

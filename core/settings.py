@@ -42,6 +42,7 @@ class ContractConfig(BaseModel):
     ema_stop_enabled: Optional[bool] = None     # None = 使用全局默认
     ema_reversal_enabled: Optional[bool] = None # None = 使用全局默认
     ema_reversal_qty: Optional[float] = None    # None = 使用全局默认
+    macd_stop_enabled: Optional[bool] = None    # None = 使用全局默认
 
     @field_validator("timeframe")
     @classmethod
@@ -62,6 +63,7 @@ class StrategyConfig(BaseModel):
     ema_stop_enabled: bool = False   # 均线止损（EMA20/40/60）总开关
     ema_reversal_enabled: bool = False  # EMA反转开仓策略总开关
     ema_reversal_qty: float = 1.0       # EMA反转开仓默认手数
+    macd_stop_enabled: bool = False  # MACD 均线止损（EMA12/26 金死叉）总开关
 
 
 class NotifyConfig(BaseModel):
@@ -156,6 +158,10 @@ def save_settings(settings: Settings) -> None:
                     contracts_raw[i]["ema_reversal_qty"] = cfg.ema_reversal_qty
                 else:
                     contracts_raw[i].pop("ema_reversal_qty", None)
+                if cfg.macd_stop_enabled is not None:
+                    contracts_raw[i]["macd_stop_enabled"] = cfg.macd_stop_enabled
+                else:
+                    contracts_raw[i].pop("macd_stop_enabled", None)
                 break
     raw["contracts"] = contracts_raw
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:

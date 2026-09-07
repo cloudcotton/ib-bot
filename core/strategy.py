@@ -87,6 +87,30 @@ def get_ema_zone(buffer: KlineBuffer, close_price: float) -> Optional[str]:
     return None
 
 
+def check_macd_stop_signal(
+    buffer: KlineBuffer,
+    position: float,
+) -> Optional[Signal]:
+    """MACD 均线止损信号检测（K 线收盘时调用）。
+
+    逻辑：
+      EMA12 > EMA26（快线高于慢线，多头趋势）→ 平空仓
+      EMA12 < EMA26（快线低于慢线，空头趋势）→ 平多仓
+
+    两条均线均可用时才触发，任一为 None 则跳过。
+    """
+    if position == 0:
+        return None
+    ema12, ema26 = buffer.ema12, buffer.ema26
+    if ema12 is None or ema26 is None:
+        return None
+    if position < 0 and ema12 > ema26:
+        return Signal.CLOSE_SHORT
+    if position > 0 and ema12 < ema26:
+        return Signal.CLOSE_LONG
+    return None
+
+
 def check_ema_signal(
     buffer: KlineBuffer,
     position: float,

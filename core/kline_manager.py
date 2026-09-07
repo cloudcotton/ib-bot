@@ -35,10 +35,14 @@ _PERIOD_SECONDS: dict[str, int] = {
     "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
 }
 
+_EMA_PERIOD_12 = 12
 _EMA_PERIOD_20 = 20
+_EMA_PERIOD_26 = 26
 _EMA_PERIOD_40 = 40
 _EMA_PERIOD_60 = 60
+_EMA_K12 = 2.0 / (_EMA_PERIOD_12 + 1)   # ≈ 0.1538
 _EMA_K20 = 2.0 / (_EMA_PERIOD_20 + 1)   # ≈ 0.0952
+_EMA_K26 = 2.0 / (_EMA_PERIOD_26 + 1)   # ≈ 0.0741
 _EMA_K40 = 2.0 / (_EMA_PERIOD_40 + 1)   # ≈ 0.0488
 _EMA_K60 = 2.0 / (_EMA_PERIOD_60 + 1)   # ≈ 0.0328
 
@@ -74,7 +78,9 @@ class KlineBuffer:
         self.completed: deque[Bar] = deque(maxlen=65)  # 保留最近 65 根（EMA60 需 60 根种子）
         self.current: Optional[Bar] = None
         self._bars_seen: int = 0                       # 累计追加的已完成 K 线数（不受 maxlen 限制）
+        self.ema12: Optional[float] = None             # 12 周期 EMA（MACD 快线）
         self.ema20: Optional[float] = None             # 20 周期 EMA，不足 20 根时为 None
+        self.ema26: Optional[float] = None             # 26 周期 EMA（MACD 慢线）
         self.ema40: Optional[float] = None             # 40 周期 EMA，不足 40 根时为 None
         self.ema60: Optional[float] = None             # 60 周期 EMA，不足 60 根时为 None
 
@@ -91,6 +97,14 @@ class KlineBuffer:
         - 满 N 根时以最新 N 根的 SMA 作为初始种子
         - 之后每根按 EMA_t = close × k + EMA_{t-1} × (1-k) 递推
         """
+        # EMA12
+        if self.ema12 is None:
+            if self._bars_seen >= _EMA_PERIOD_12:
+                seed = [b.close for b in list(self.completed)[-_EMA_PERIOD_12:]]
+                self.ema12 = sum(seed) / _EMA_PERIOD_12
+        else:
+            self.ema12 = close * _EMA_K12 + self.ema12 * (1 - _EMA_K12)
+
         # EMA20
         if self.ema20 is None:
             if self._bars_seen >= _EMA_PERIOD_20:
@@ -98,6 +112,14 @@ class KlineBuffer:
                 self.ema20 = sum(seed) / _EMA_PERIOD_20
         else:
             self.ema20 = close * _EMA_K20 + self.ema20 * (1 - _EMA_K20)
+
+        # EMA26
+        if self.ema26 is None:
+            if self._bars_seen >= _EMA_PERIOD_26:
+                seed = [b.close for b in list(self.completed)[-_EMA_PERIOD_26:]]
+                self.ema26 = sum(seed) / _EMA_PERIOD_26
+        else:
+            self.ema26 = close * _EMA_K26 + self.ema26 * (1 - _EMA_K26)
 
         # EMA40
         if self.ema40 is None:
@@ -124,7 +146,9 @@ class KlineBuffer:
         self.completed.clear()
         self.current = None
         self._bars_seen = 0
+        self.ema12 = None
         self.ema20 = None
+        self.ema26 = None
         self.ema40 = None
         self.ema60 = None
 

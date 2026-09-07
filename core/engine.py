@@ -23,7 +23,7 @@ from core.equity_recorder import EquityRecorder
 from core.kline_manager import Bar, KlineBuffer, TickBarBuilder, _PERIOD_SECONDS
 from core.notifier import TelegramNotifier
 from core.settings import ContractConfig, Settings, save_settings
-from core.strategy import Signal, check_ema_signal, check_signal, get_ema_zone
+from core.strategy import Signal, check_ema_signal, check_macd_stop_signal, check_signal, get_ema_zone
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,7 @@ class ContractMonitor:
         self._signal_enabled: bool = True       # 双K止损信号开关
         self._ema_stop_enabled: bool = False    # 均线止损（EMA20/40/60）开关
         self._ema_reversal_enabled: bool = False # EMA反转开仓策略开关
+        self._macd_stop_enabled: bool = False   # MACD均线止损（EMA12/26）开关
         self._ema_reversal_qty: float = 1.0      # EMA反转开仓手数
         self._ema_trend_state: Optional[str] = None  # 状态机："LONG" | "SHORT" | None
 
@@ -163,6 +164,7 @@ class ContractMonitor:
                 self._check_reversal_entry(closed_bar)
                 self._check_ema_stop(closed_bar)
                 self._check_ema_reversal(closed_bar)
+                self._check_macd_stop(closed_bar)
 
     def _check_static_stops(self, tick_price: float) -> None:
         """静态止损检测：每 tick 比较预设止损价，触发时立即清零并平仓。
@@ -314,6 +316,27 @@ class ContractMonitor:
         _safe_ensure_future(
             self._execute_close(signal, reason="均线止损"),
             label=f"{self.cfg.key} ema_stop",
+        )
+
+    def _check_macd_stop(self, closed_bar: Bar) -> None:
+        """MACD 均线止损检测（K 线收盘时调用）。
+        EMA12 > EMA26 → 看多 → 平空仓；EMA12 < EMA26 → 看空 → 平多仓。
+        """
+        if not self._macd_stop_enabled:
+            return
+        signal = check_macd_stop_signal(self.buffer, self._position)
+        if signal is None:
+            return
+        if self._in_flight:
+            return
+        self._in_flight = True
+        logger.info(
+            f"[{self.cfg.key}] MACD止损信号: {signal.value} "
+            f"持仓={self._position} ema12={self.buffer.ema12:.4f} ema26={self.buffer.ema26:.4f}"
+        )
+        _safe_ensure_future(
+            self._execute_close(signal, reason="MACD止损"),
+            label=f"{self.cfg.key} macd_stop",
         )
 
     def _check_ema_reversal(self, closed_bar: Bar) -> None:
@@ -561,7 +584,9 @@ class ContractMonitor:
                 if self._last_signal and self._last_signal in self._last_signal_time
                 else None
             ),
+            "ema12": round(buf.ema12, 4) if buf.ema12 is not None else None,
             "ema20": round(buf.ema20, 4) if buf.ema20 is not None else None,
+            "ema26": round(buf.ema26, 4) if buf.ema26 is not None else None,
             "ema40": round(buf.ema40, 4) if buf.ema40 is not None else None,
             "ema60": round(buf.ema60, 4) if buf.ema60 is not None else None,
             "current_bar": current.to_dict() if current else None,
@@ -572,6 +597,7 @@ class ContractMonitor:
             "signal_enabled": self._signal_enabled,
             "ema_stop_enabled": self._ema_stop_enabled,
             "ema_reversal_enabled": self._ema_reversal_enabled,
+            "macd_stop_enabled": self._macd_stop_enabled,
             "ema_reversal_qty": self._ema_reversal_qty,
             "ema_trend_state": self._ema_trend_state,
             "buy_target": self._buy_target,
@@ -719,6 +745,10 @@ class TradingEngine:
         monitor._ema_reversal_qty = (
             cfg.ema_reversal_qty if cfg.ema_reversal_qty is not None
             else self.settings.strategy.ema_reversal_qty
+        )
+        monitor._macd_stop_enabled = (
+            cfg.macd_stop_enabled if cfg.macd_stop_enabled is not None
+            else self.settings.strategy.macd_stop_enabled
         )
         qty = self.ib_client.get_position(ib_contract.conId)
         avg_cost = self.ib_client.get_avg_cost(ib_contract.conId)
@@ -1264,6 +1294,7 @@ class TradingEngine:
         ema_stop_enabled: Optional[bool] = None,
         ema_reversal_enabled: Optional[bool] = None,
         ema_reversal_qty: Optional[float] = None,
+        macd_stop_enabled: Optional[bool] = None,
     ) -> dict:
         """更新单个合约的策略开关及参数，并持久化到 config.yaml。"""
         monitor = self._monitors.get(key)
@@ -1285,6 +1316,10 @@ class TradingEngine:
             monitor._ema_reversal_qty = ema_reversal_qty
             monitor.cfg.ema_reversal_qty = ema_reversal_qty
             logger.info(f"[{key}] EMA反转手数更新: {ema_reversal_qty}")
+        if macd_stop_enabled is not None:
+            monitor._macd_stop_enabled = macd_stop_enabled
+            monitor.cfg.macd_stop_enabled = macd_stop_enabled
+            logger.info(f"[{key}] MACD止损已{'启用' if macd_stop_enabled else '暂停'}")
         save_settings(self.settings)
         return {
             "success": True,
@@ -1292,4 +1327,5 @@ class TradingEngine:
             "ema_stop_enabled": monitor._ema_stop_enabled,
             "ema_reversal_enabled": monitor._ema_reversal_enabled,
             "ema_reversal_qty": monitor._ema_reversal_qty,
+            "macd_stop_enabled": monitor._macd_stop_enabled,
         }
