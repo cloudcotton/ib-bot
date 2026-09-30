@@ -331,7 +331,13 @@ class ContractMonitor:
             return
 
         zone = "LONG" if ema12 > ema26 else "SHORT"
-        is_new_cross = zone != self._macd_trend_state
+
+        # 首次启动/重连后首根K线：仅初始化状态，不视为新的金/死叉
+        if self._macd_trend_state is None:
+            self._macd_trend_state = zone
+            is_new_cross = False
+        else:
+            is_new_cross = (zone != self._macd_trend_state)
 
         # ── 止损检查（每K线，不受状态机约束）────────────────────────────────
         if zone == "LONG" and self._position < 0:
