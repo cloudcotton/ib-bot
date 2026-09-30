@@ -319,14 +319,10 @@ class ContractMonitor:
     def _check_macd_trend(self, closed_bar: Bar) -> None:
         """MACD趋势策略检测（K线收盘时调用）。
 
-        金叉（EMA12 > EMA26）：
-          - 若持空仓 → 无条件平空；首次金叉且 qty>0 则平后开多（SAR）
-          - 若无仓且首次金叉且 qty>0 → 直接开多
-          - 若已持多或状态已是 LONG → 不动
-        死叉（EMA12 < EMA26）：
-          - 若持多仓 → 无条件平多；首次死叉且 qty>0 则平后开空（SAR）
-          - 若无仓且首次死叉且 qty>0 → 直接开空
-          - 若已持空或状态已是 SHORT → 不动
+        止损：每根K线收盘都检查，EMA关系与持仓方向相反时无条件平仓
+              （非首次交叉时不开仓，仅止损重试）
+        开仓：仅在金/死叉首次发生（状态机跳变）且 qty>0 时触发
+              若当时持有反向仓，平仓成功后紧接着开顺向仓（SAR）
         """
         if not self._macd_trend_enabled:
             return
@@ -335,64 +331,56 @@ class ContractMonitor:
             return
 
         zone = "LONG" if ema12 > ema26 else "SHORT"
-        is_new = zone != self._macd_trend_state
-        open_enabled = is_new and self._macd_strategy_qty > 0
+        is_new_cross = zone != self._macd_trend_state
 
-        if zone == "LONG":
-            if self._position < 0:
-                if self._in_flight:
-                    return
-                self._in_flight = True
-                if is_new:
-                    self._macd_trend_state = "LONG"
-                _safe_ensure_future(
-                    self._execute_macd_trend(
-                        Signal.CLOSE_SHORT,
-                        "long" if open_enabled else None,
-                        "MACD趋势（平空）",
-                    ),
-                    label=f"{self.cfg.key} macd_trend_long",
-                )
-            elif self._position > 0:
-                if is_new:
-                    self._macd_trend_state = "LONG"
-            else:
-                if is_new:
-                    self._macd_trend_state = "LONG"
-                    if open_enabled and not self._in_flight:
-                        self._in_flight = True
-                        _safe_ensure_future(
-                            self._execute_macd_trend_open("long", "MACD趋势开多"),
-                            label=f"{self.cfg.key} macd_trend_open_long",
-                        )
+        # ── 止损检查（每K线，不受状态机约束）────────────────────────────────
+        if zone == "LONG" and self._position < 0:
+            # EMA金叉但持空仓 → 止损平空；首次金叉且 qty>0 则顺势开多（SAR）
+            if self._in_flight:
+                return
+            self._in_flight = True
+            if is_new_cross:
+                self._macd_trend_state = "LONG"
+            open_after = is_new_cross and self._macd_strategy_qty > 0
+            _safe_ensure_future(
+                self._execute_macd_trend(
+                    Signal.CLOSE_SHORT,
+                    "long" if open_after else None,
+                    "MACD趋势（止损平空）",
+                ),
+                label=f"{self.cfg.key} macd_trend_stop_long",
+            )
+            return
 
-        elif zone == "SHORT":
-            if self._position > 0:
-                if self._in_flight:
-                    return
+        if zone == "SHORT" and self._position > 0:
+            # EMA死叉但持多仓 → 止损平多；首次死叉且 qty>0 则顺势开空（SAR）
+            if self._in_flight:
+                return
+            self._in_flight = True
+            if is_new_cross:
+                self._macd_trend_state = "SHORT"
+            open_after = is_new_cross and self._macd_strategy_qty > 0
+            _safe_ensure_future(
+                self._execute_macd_trend(
+                    Signal.CLOSE_LONG,
+                    "short" if open_after else None,
+                    "MACD趋势（止损平多）",
+                ),
+                label=f"{self.cfg.key} macd_trend_stop_short",
+            )
+            return
+
+        # ── 开仓检查（仅首次交叉，无持仓时）────────────────────────────────
+        if is_new_cross:
+            self._macd_trend_state = zone
+            if self._macd_strategy_qty > 0 and self._position == 0 and not self._in_flight:
                 self._in_flight = True
-                if is_new:
-                    self._macd_trend_state = "SHORT"
+                direction = "long" if zone == "LONG" else "short"
+                reason = "MACD趋势开多" if zone == "LONG" else "MACD趋势开空"
                 _safe_ensure_future(
-                    self._execute_macd_trend(
-                        Signal.CLOSE_LONG,
-                        "short" if open_enabled else None,
-                        "MACD趋势（平多）",
-                    ),
-                    label=f"{self.cfg.key} macd_trend_short",
+                    self._execute_macd_trend_open(direction, reason),
+                    label=f"{self.cfg.key} macd_trend_open_{direction}",
                 )
-            elif self._position < 0:
-                if is_new:
-                    self._macd_trend_state = "SHORT"
-            else:
-                if is_new:
-                    self._macd_trend_state = "SHORT"
-                    if open_enabled and not self._in_flight:
-                        self._in_flight = True
-                        _safe_ensure_future(
-                            self._execute_macd_trend_open("short", "MACD趋势开空"),
-                            label=f"{self.cfg.key} macd_trend_open_short",
-                        )
 
     async def _execute_macd_trend(
         self,
