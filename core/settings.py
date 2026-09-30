@@ -40,9 +40,8 @@ class ContractConfig(BaseModel):
     enabled: bool = True
     signal_enabled: Optional[bool] = None       # None = 使用全局默认
     ema_stop_enabled: Optional[bool] = None     # None = 使用全局默认
-    macd_reversal_enabled: Optional[bool] = None # None = 使用全局默认
-    macd_reversal_qty: Optional[float] = None    # None = 使用全局默认
-    macd_stop_enabled: Optional[bool] = None    # None = 使用全局默认
+    macd_trend_enabled: Optional[bool] = None   # None = 使用全局默认
+    macd_strategy_qty: Optional[float] = None   # None = 使用全局默认
 
     @field_validator("timeframe")
     @classmethod
@@ -61,9 +60,8 @@ class StrategyConfig(BaseModel):
     signal_enabled: bool = True      # 双K止损信号总开关
     signal_cooldown_sec: int = 30
     ema_stop_enabled: bool = False   # 均线止损（EMA20/40/60）总开关
-    macd_reversal_enabled: bool = False  # MACD反转开仓策略总开关
-    macd_reversal_qty: float = 1.0       # MACD反转开仓默认手数
-    macd_stop_enabled: bool = False  # MACD 均线止损（EMA12/26 金死叉）总开关
+    macd_trend_enabled: bool = False # MACD趋势策略总开关（止损 + 可选SAR开仓）
+    macd_strategy_qty: float = 0.0   # MACD趋势开仓手数（0=仅止损，>0=SAR）
 
 
 class NotifyConfig(BaseModel):
@@ -150,18 +148,14 @@ def save_settings(settings: Settings) -> None:
                     contracts_raw[i]["ema_stop_enabled"] = cfg.ema_stop_enabled
                 else:
                     contracts_raw[i].pop("ema_stop_enabled", None)
-                if cfg.macd_reversal_enabled is not None:
-                    contracts_raw[i]["macd_reversal_enabled"] = cfg.macd_reversal_enabled
+                if cfg.macd_trend_enabled is not None:
+                    contracts_raw[i]["macd_trend_enabled"] = cfg.macd_trend_enabled
                 else:
-                    contracts_raw[i].pop("macd_reversal_enabled", None)
-                if cfg.macd_reversal_qty is not None:
-                    contracts_raw[i]["macd_reversal_qty"] = cfg.macd_reversal_qty
+                    contracts_raw[i].pop("macd_trend_enabled", None)
+                if cfg.macd_strategy_qty is not None:
+                    contracts_raw[i]["macd_strategy_qty"] = cfg.macd_strategy_qty
                 else:
-                    contracts_raw[i].pop("macd_reversal_qty", None)
-                if cfg.macd_stop_enabled is not None:
-                    contracts_raw[i]["macd_stop_enabled"] = cfg.macd_stop_enabled
-                else:
-                    contracts_raw[i].pop("macd_stop_enabled", None)
+                    contracts_raw[i].pop("macd_strategy_qty", None)
                 break
     raw["contracts"] = contracts_raw
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:

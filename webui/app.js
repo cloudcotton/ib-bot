@@ -247,9 +247,8 @@ function buildCardDisplay(c) {
   // MACD（EMA12/26）展示行
   let macdHTML = '';
   if (c.ema12 != null || c.ema26 != null) {
-    const macdOn    = c.macd_stop_enabled === true;
-    const macdRevOn = c.macd_reversal_enabled === true;
-    const macdColor = (macdOn || macdRevOn) ? 'var(--purple)' : 'var(--text-dim)';
+    const macdTrendOn = c.macd_trend_enabled === true;
+    const macdColor   = macdTrendOn ? 'var(--purple)' : 'var(--text-dim)';
     const e12 = c.ema12 != null ? fmt(c.ema12) : '—';
     const e26 = c.ema26 != null ? fmt(c.ema26) : '—';
     let macdCrossState = '';
@@ -261,14 +260,16 @@ function buildCardDisplay(c) {
       else
         macdCrossState = `　<span style="color:var(--text-dim)">持平</span>`;
     }
-    let macdRevStateHTML = '';
-    if (macdRevOn) {
+    let macdTrendStateHTML = '';
+    if (macdTrendOn) {
       const stateLabel = c.macd_trend_state === 'LONG'  ? '<span style="color:var(--green)">状态:多</span>'
                        : c.macd_trend_state === 'SHORT' ? '<span style="color:var(--red)">状态:空</span>'
                        : '<span style="color:var(--text-dim)">状态:—</span>';
-      macdRevStateHTML = `　${stateLabel}`;
+      const sarMode = (c.macd_strategy_qty ?? 0) > 0
+        ? `　<span style="color:var(--text-dim)">SAR ${c.macd_strategy_qty}手</span>` : '';
+      macdTrendStateHTML = `　${stateLabel}${sarMode}`;
     }
-    macdHTML = `<div class="reversal-row" style="color:${macdColor};font-size:12px">EMA12: ${e12}　EMA26: ${e26}${macdCrossState}${macdRevStateHTML}</div>`;
+    macdHTML = `<div class="reversal-row" style="color:${macdColor};font-size:12px">EMA12: ${e12}　EMA26: ${e26}${macdCrossState}${macdTrendStateHTML}</div>`;
   }
 
   const sigOn = c.signal_enabled !== false;
@@ -317,8 +318,7 @@ function buildCardControls(c) {
   const safeId  = key.replace('@', '-');
   const sigOn   = c.signal_enabled !== false;
   const emaOn   = c.ema_stop_enabled === true;
-  const macdRevOn = c.macd_reversal_enabled === true;
-  const macdOn    = c.macd_stop_enabled === true;
+  const macdTrendOn = c.macd_trend_enabled === true;
   return `
     <div class="card-controls">
       <div class="ctrl-label">策略开关</div>
@@ -342,29 +342,20 @@ function buildCardControls(c) {
           <span id="cst-ema-lbl-${safeId}" class="toggle-label ${emaOn ? 'on' : 'off'}">${emaOn ? '已启用' : '已暂停'}</span>
         </span>
         <span class="ctrl-strategy-item">
-          <span class="ctrl-strategy-name">MACD止损</span>
+          <span class="ctrl-strategy-name">MACD趋势</span>
           <label class="toggle-switch toggle-xs">
-            <input type="checkbox" id="cst-macd-${safeId}" ${macdOn ? 'checked' : ''}
+            <input type="checkbox" id="cst-macd-${safeId}" ${macdTrendOn ? 'checked' : ''}
                    onchange="setContractStrategy('${key}','macd')" />
             <span class="toggle-slider"></span>
           </label>
-          <span id="cst-macd-lbl-${safeId}" class="toggle-label ${macdOn ? 'on' : 'off'}">${macdOn ? '已启用' : '已暂停'}</span>
-        </span>
-        <span class="ctrl-strategy-item">
-          <span class="ctrl-strategy-name">MACD反转开仓</span>
-          <label class="toggle-switch toggle-xs">
-            <input type="checkbox" id="cst-mrev-${safeId}" ${macdRevOn ? 'checked' : ''}
-                   onchange="setContractStrategy('${key}','macd_reversal')" />
-            <span class="toggle-slider"></span>
-          </label>
-          <span id="cst-mrev-lbl-${safeId}" class="toggle-label ${macdRevOn ? 'on' : 'off'}">${macdRevOn ? '已启用' : '已暂停'}</span>
+          <span id="cst-macd-lbl-${safeId}" class="toggle-label ${macdTrendOn ? 'on' : 'off'}">${macdTrendOn ? '已启用' : '已暂停'}</span>
         </span>
       </div>
-      <div class="ctrl-row" id="cst-mrev-qty-row-${safeId}" style="${macdRevOn ? '' : 'display:none'}">
-        <span class="ctrl-strategy-name" style="white-space:nowrap">MACD反转手数</span>
-        <input id="cst-mrev-qty-${safeId}" class="ctrl-input ctrl-qty" type="number" min="1" step="1"
-               placeholder="${c.macd_reversal_qty ?? 1}" />
-        <button class="btn btn-xs btn-secondary" onclick="setContractStrategy('${key}','macd_reversal_qty')">确定</button>
+      <div class="ctrl-row" id="cst-macd-qty-row-${safeId}" style="${macdTrendOn ? '' : 'display:none'}">
+        <span class="ctrl-strategy-name" style="white-space:nowrap">MACD手数 (0=止损)</span>
+        <input id="cst-macd-qty-${safeId}" class="ctrl-input ctrl-qty" type="number" min="0" step="1"
+               placeholder="${c.macd_strategy_qty ?? 0}" />
+        <button class="btn btn-xs btn-secondary" onclick="setContractStrategy('${key}','macd_qty')">确定</button>
       </div>
       <div class="ctrl-label" style="margin-top:4px">抄底 / 摸顶</div>
       <div class="ctrl-row">
@@ -397,29 +388,24 @@ function syncCardControlValues(card, c) {
   // 策略开关同步（以服务端状态为准）
   const sigOn  = c.signal_enabled !== false;
   const emaOn  = c.ema_stop_enabled === true;
-  const macdOn    = c.macd_stop_enabled === true;
-  const macdRevOn = c.macd_reversal_enabled === true;
+  const macdTrendOn = c.macd_trend_enabled === true;
   const sigCb   = document.getElementById(`cst-sig-${safeId}`);
   const sigLbl  = document.getElementById(`cst-sig-lbl-${safeId}`);
   const emaCb   = document.getElementById(`cst-ema-${safeId}`);
   const emaLbl  = document.getElementById(`cst-ema-lbl-${safeId}`);
   const macdCb  = document.getElementById(`cst-macd-${safeId}`);
   const macdLbl = document.getElementById(`cst-macd-lbl-${safeId}`);
-  const mrevCb   = document.getElementById(`cst-mrev-${safeId}`);
-  const mrevLbl  = document.getElementById(`cst-mrev-lbl-${safeId}`);
-  const mrevQtyRow = document.getElementById(`cst-mrev-qty-row-${safeId}`);
-  const mrevQtyEl  = document.getElementById(`cst-mrev-qty-${safeId}`);
+  const macdQtyRow = document.getElementById(`cst-macd-qty-row-${safeId}`);
+  const macdQtyEl  = document.getElementById(`cst-macd-qty-${safeId}`);
   if (sigCb)   sigCb.checked  = sigOn;
   if (sigLbl)  { sigLbl.textContent  = sigOn  ? '已启用' : '已暂停'; sigLbl.className  = 'toggle-label ' + (sigOn  ? 'on' : 'off'); }
   if (emaCb)   emaCb.checked  = emaOn;
   if (emaLbl)  { emaLbl.textContent  = emaOn  ? '已启用' : '已暂停'; emaLbl.className  = 'toggle-label ' + (emaOn  ? 'on' : 'off'); }
-  if (macdCb)  macdCb.checked = macdOn;
-  if (macdLbl) { macdLbl.textContent = macdOn ? '已启用' : '已暂停'; macdLbl.className = 'toggle-label ' + (macdOn ? 'on' : 'off'); }
-  if (mrevCb)   mrevCb.checked  = macdRevOn;
-  if (mrevLbl)  { mrevLbl.textContent  = macdRevOn  ? '已启用' : '已暂停'; mrevLbl.className  = 'toggle-label ' + (macdRevOn  ? 'on' : 'off'); }
-  if (mrevQtyRow) mrevQtyRow.style.display = macdRevOn ? '' : 'none';
-  if (mrevQtyEl && document.activeElement !== mrevQtyEl && !mrevQtyEl.value)
-    mrevQtyEl.placeholder = `手数 (当前 ${c.macd_reversal_qty ?? 1})`;
+  if (macdCb)  macdCb.checked = macdTrendOn;
+  if (macdLbl) { macdLbl.textContent = macdTrendOn ? '已启用' : '已暂停'; macdLbl.className = 'toggle-label ' + (macdTrendOn ? 'on' : 'off'); }
+  if (macdQtyRow) macdQtyRow.style.display = macdTrendOn ? '' : 'none';
+  if (macdQtyEl && document.activeElement !== macdQtyEl && !macdQtyEl.value)
+    macdQtyEl.placeholder = `手数 (当前 ${c.macd_strategy_qty ?? 0})`;
 }
 
 // ── 下拉框同步 ───────────────────────────────────────────────────────────
@@ -629,24 +615,18 @@ async function setContractStrategy(key, type) {
     msg = enabled ? '均线止损已启用' : '均线止损已暂停';
   } else if (type === 'macd') {
     const enabled = document.getElementById(`cst-macd-${safeId}`).checked;
-    body.macd_stop_enabled = enabled;
+    body.macd_trend_enabled = enabled;
     const lbl = document.getElementById(`cst-macd-lbl-${safeId}`);
     if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
-    msg = enabled ? 'MACD止损已启用' : 'MACD止损已暂停';
-  } else if (type === 'macd_reversal') {
-    const enabled = document.getElementById(`cst-mrev-${safeId}`).checked;
-    body.macd_reversal_enabled = enabled;
-    const lbl = document.getElementById(`cst-mrev-lbl-${safeId}`);
-    if (lbl) { lbl.textContent = enabled ? '已启用' : '已暂停'; lbl.className = 'toggle-label ' + (enabled ? 'on' : 'off'); }
-    const qtyRow = document.getElementById(`cst-mrev-qty-row-${safeId}`);
+    const qtyRow = document.getElementById(`cst-macd-qty-row-${safeId}`);
     if (qtyRow) qtyRow.style.display = enabled ? '' : 'none';
-    msg = enabled ? 'MACD反转开仓已启用' : 'MACD反转开仓已暂停';
-  } else if (type === 'macd_reversal_qty') {
-    const qtyEl = document.getElementById(`cst-mrev-qty-${safeId}`);
+    msg = enabled ? 'MACD趋势策略已启用' : 'MACD趋势策略已暂停';
+  } else if (type === 'macd_qty') {
+    const qtyEl = document.getElementById(`cst-macd-qty-${safeId}`);
     const qty = parseFloat(qtyEl?.value);
-    if (!qty || qty <= 0) return showMsg(`rc-msg-${safeId}`, '手数必须大于 0', false);
-    body.macd_reversal_qty = qty;
-    msg = `MACD反转手数已更新: ${qty}`;
+    if (isNaN(qty) || qty < 0) return showMsg(`rc-msg-${safeId}`, '手数不能为负数', false);
+    body.macd_strategy_qty = qty;
+    msg = qty > 0 ? `MACD趋势手数已更新: ${qty} 手（SAR模式）` : 'MACD趋势手数已更新: 0（仅止损模式）';
     if (qtyEl) qtyEl.value = '';
   }
   await apiCall('/api/params/contract_strategy', body, `rc-msg-${safeId}`, msg);
