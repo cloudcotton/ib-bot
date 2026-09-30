@@ -23,7 +23,7 @@ from core.equity_recorder import EquityRecorder
 from core.kline_manager import Bar, KlineBuffer, TickBarBuilder, _PERIOD_SECONDS
 from core.notifier import TelegramNotifier
 from core.settings import ContractConfig, Settings, save_settings
-from core.strategy import Signal, check_ema_signal, check_macd_stop_signal, check_signal, get_ema_zone
+from core.strategy import Signal, check_ema_signal, check_macd_stop_signal, check_signal
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +70,10 @@ class ContractMonitor:
         self._initialized: bool = False     # 历史K线是否已预热
         self._signal_enabled: bool = True       # 双K止损信号开关
         self._ema_stop_enabled: bool = False    # 均线止损（EMA20/40/60）开关
-        self._ema_reversal_enabled: bool = False # EMA反转开仓策略开关
-        self._macd_stop_enabled: bool = False   # MACD均线止损（EMA12/26）开关
-        self._ema_reversal_qty: float = 1.0      # EMA反转开仓手数
-        self._ema_trend_state: Optional[str] = None  # 状态机："LONG" | "SHORT" | None
+        self._macd_reversal_enabled: bool = False # MACD反转开仓策略开关
+        self._macd_stop_enabled: bool = False     # MACD均线止损（EMA12/26）开关
+        self._macd_reversal_qty: float = 1.0      # MACD反转开仓手数
+        self._macd_trend_state: Optional[str] = None  # 状态机："LONG" | "SHORT" | None
 
         # 持仓状态
         self._position: float = 0.0
@@ -163,7 +163,7 @@ class ContractMonitor:
                 closed_bar = self.buffer.completed[-1]
                 self._check_reversal_entry(closed_bar)
                 self._check_ema_stop(closed_bar)
-                self._check_ema_reversal(closed_bar)
+                self._check_macd_reversal(closed_bar)
                 self._check_macd_stop(closed_bar)
 
     def _check_static_stops(self, tick_price: float) -> None:
@@ -339,51 +339,54 @@ class ContractMonitor:
             label=f"{self.cfg.key} macd_stop",
         )
 
-    def _check_ema_reversal(self, closed_bar: Bar) -> None:
-        """EMA反转开仓策略检测（K线收盘时调用）。
+    def _check_macd_reversal(self, closed_bar: Bar) -> None:
+        """MACD反转开仓策略检测（K线收盘时调用）。
 
         逻辑：
-          多头区间（close > max EMA）：
-            - 若持空仓（反向）→ 先平空，若为首次突破则平后开多
-            - 若无仓且首次突破 → 开多
+          金叉（EMA12 > EMA26）：
+            - 若持空仓（反向）→ 先平空，若为首次金叉则平后开多
+            - 若无仓且首次金叉 → 开多
             - 若已持多或状态已是 LONG → 不动
-          空头区间（close < min EMA）：
-            - 若持多仓（反向）→ 先平多，若为首次突破则平后开空
-            - 若无仓且首次突破 → 开空
+          死叉（EMA12 < EMA26）：
+            - 若持多仓（反向）→ 先平多，若为首次死叉则平后开空
+            - 若无仓且首次死叉 → 开空
             - 若已持空或状态已是 SHORT → 不动
-          横盘区间：不做任何操作（状态保持不变）
         """
-        if not self._ema_reversal_enabled:
+        if not self._macd_reversal_enabled:
             return
-        zone = get_ema_zone(self.buffer, closed_bar.close)
-        if zone is None:
+        ema12, ema26 = self.buffer.ema12, self.buffer.ema26
+        if ema12 is None or ema26 is None:
             return
+        if ema12 == ema26:
+            return
+
+        zone = "LONG" if ema12 > ema26 else "SHORT"
 
         if zone == "LONG":
             if self._position < 0:
                 if self._in_flight:
                     return
                 self._in_flight = True
-                open_after = self._ema_trend_state != "LONG"
+                open_after = self._macd_trend_state != "LONG"
                 if open_after:
-                    self._ema_trend_state = "LONG"
+                    self._macd_trend_state = "LONG"
                 _safe_ensure_future(
-                    self._execute_ema_reversal(
+                    self._execute_macd_reversal(
                         Signal.CLOSE_SHORT,
                         "long" if open_after else None,
-                        "EMA反转（平空）",
+                        "MACD反转（平空）",
                     ),
-                    label=f"{self.cfg.key} ema_reversal_long",
+                    label=f"{self.cfg.key} macd_reversal_long",
                 )
             elif self._position > 0:
-                if self._ema_trend_state != "LONG":
-                    self._ema_trend_state = "LONG"
+                if self._macd_trend_state != "LONG":
+                    self._macd_trend_state = "LONG"
             else:
-                if self._ema_trend_state != "LONG" and not self._in_flight:
-                    self._ema_trend_state = "LONG"
+                if self._macd_trend_state != "LONG" and not self._in_flight:
+                    self._macd_trend_state = "LONG"
                     _safe_ensure_future(
-                        self._execute_ema_reversal_open("long", "EMA反转开多"),
-                        label=f"{self.cfg.key} ema_reversal_open_long",
+                        self._execute_macd_reversal_open("long", "MACD反转开多"),
+                        label=f"{self.cfg.key} macd_reversal_open_long",
                     )
 
         elif zone == "SHORT":
@@ -391,37 +394,37 @@ class ContractMonitor:
                 if self._in_flight:
                     return
                 self._in_flight = True
-                open_after = self._ema_trend_state != "SHORT"
+                open_after = self._macd_trend_state != "SHORT"
                 if open_after:
-                    self._ema_trend_state = "SHORT"
+                    self._macd_trend_state = "SHORT"
                 _safe_ensure_future(
-                    self._execute_ema_reversal(
+                    self._execute_macd_reversal(
                         Signal.CLOSE_LONG,
                         "short" if open_after else None,
-                        "EMA反转（平多）",
+                        "MACD反转（平多）",
                     ),
-                    label=f"{self.cfg.key} ema_reversal_short",
+                    label=f"{self.cfg.key} macd_reversal_short",
                 )
             elif self._position < 0:
-                if self._ema_trend_state != "SHORT":
-                    self._ema_trend_state = "SHORT"
+                if self._macd_trend_state != "SHORT":
+                    self._macd_trend_state = "SHORT"
             else:
-                if self._ema_trend_state != "SHORT" and not self._in_flight:
-                    self._ema_trend_state = "SHORT"
+                if self._macd_trend_state != "SHORT" and not self._in_flight:
+                    self._macd_trend_state = "SHORT"
                     _safe_ensure_future(
-                        self._execute_ema_reversal_open("short", "EMA反转开空"),
-                        label=f"{self.cfg.key} ema_reversal_open_short",
+                        self._execute_macd_reversal_open("short", "MACD反转开空"),
+                        label=f"{self.cfg.key} macd_reversal_open_short",
                     )
 
-    async def _execute_ema_reversal(
+    async def _execute_macd_reversal(
         self,
         close_signal: Signal,
         open_direction: Optional[str],
         reason: str,
     ) -> None:
-        """EMA反转策略：先市价平反向仓（等成交），再开顺向仓（若为首次突破）。"""
+        """MACD反转策略：先市价平反向仓（等成交），再开顺向仓（若为首次金/死叉）。"""
         if self._close_lock.locked():
-            logger.debug(f"[{self.cfg.key}] 平仓进行中，丢弃EMA反转信号")
+            logger.debug(f"[{self.cfg.key}] 平仓进行中，丢弃MACD反转信号")
             self._in_flight = False
             return
         async with self._close_lock:
@@ -441,34 +444,34 @@ class ContractMonitor:
                             price=price,
                         )
                     if open_direction is not None:
-                        await self._execute_ema_reversal_open(open_direction, reason + "→开仓")
+                        await self._execute_macd_reversal_open(open_direction, reason + "→开仓")
             except Exception as e:
-                logger.error(f"[{self.cfg.key}] EMA反转平仓异常: {e}")
+                logger.error(f"[{self.cfg.key}] MACD反转平仓异常: {e}")
             finally:
                 self._in_flight = False
 
-    async def _execute_ema_reversal_open(self, direction: str, reason: str = "EMA反转") -> None:
-        """EMA反转策略市价开仓。"""
+    async def _execute_macd_reversal_open(self, direction: str, reason: str = "MACD反转") -> None:
+        """MACD反转策略市价开仓。"""
         try:
             trade = self._ib.open_position(
                 contract=self.contract,
                 direction=direction,
-                qty=self._ema_reversal_qty,
+                qty=self._macd_reversal_qty,
                 order_type="market",
             )
             side = "多" if direction == "long" else "空"
             logger.info(
                 f"[{self.cfg.key}] {reason} 开仓指令已发送: {direction} "
-                f"{self._ema_reversal_qty} 手 orderId={trade.order.orderId}"
+                f"{self._macd_reversal_qty} 手 orderId={trade.order.orderId}"
             )
             if self._notifier:
                 self._notifier.send(
-                    f"📈 <b>EMA反转开{side}</b>\n"
+                    f"📈 <b>MACD反转开{side}</b>\n"
                     f"合约: <code>{self.cfg.symbol}@{self.cfg.exchange}</code>\n"
-                    f"方向: {side}  手数: {self._ema_reversal_qty}"
+                    f"方向: {side}  手数: {self._macd_reversal_qty}"
                 )
         except Exception as e:
-            logger.error(f"[{self.cfg.key}] EMA反转开仓异常: {e}")
+            logger.error(f"[{self.cfg.key}] MACD反转开仓异常: {e}")
 
     async def _execute_open(self, direction: str, trigger_price: float) -> None:
         """市价开仓（抄底/摸顶），双K止损启用时自动跟踪止损。"""
@@ -596,10 +599,10 @@ class ContractMonitor:
             "min_tick": self.cfg.min_tick,
             "signal_enabled": self._signal_enabled,
             "ema_stop_enabled": self._ema_stop_enabled,
-            "ema_reversal_enabled": self._ema_reversal_enabled,
+            "macd_reversal_enabled": self._macd_reversal_enabled,
             "macd_stop_enabled": self._macd_stop_enabled,
-            "ema_reversal_qty": self._ema_reversal_qty,
-            "ema_trend_state": self._ema_trend_state,
+            "macd_reversal_qty": self._macd_reversal_qty,
+            "macd_trend_state": self._macd_trend_state,
             "buy_target": self._buy_target,
             "sell_target": self._sell_target,
             "reversal_qty": self._reversal_qty,
@@ -738,13 +741,13 @@ class TradingEngine:
             cfg.ema_stop_enabled if cfg.ema_stop_enabled is not None
             else self.settings.strategy.ema_stop_enabled
         )
-        monitor._ema_reversal_enabled = (
-            cfg.ema_reversal_enabled if cfg.ema_reversal_enabled is not None
-            else self.settings.strategy.ema_reversal_enabled
+        monitor._macd_reversal_enabled = (
+            cfg.macd_reversal_enabled if cfg.macd_reversal_enabled is not None
+            else self.settings.strategy.macd_reversal_enabled
         )
-        monitor._ema_reversal_qty = (
-            cfg.ema_reversal_qty if cfg.ema_reversal_qty is not None
-            else self.settings.strategy.ema_reversal_qty
+        monitor._macd_reversal_qty = (
+            cfg.macd_reversal_qty if cfg.macd_reversal_qty is not None
+            else self.settings.strategy.macd_reversal_qty
         )
         monitor._macd_stop_enabled = (
             cfg.macd_stop_enabled if cfg.macd_stop_enabled is not None
@@ -1166,7 +1169,7 @@ class TradingEngine:
             # 清空 K 线缓冲与 Tick 合成器，重置 EMA 反转状态机
             monitor.buffer.reset()
             monitor._initialized = False
-            monitor._ema_trend_state = None
+            monitor._macd_trend_state = None
             if monitor._tick_builder is not None:
                 monitor._tick_builder.reset()
 
@@ -1292,8 +1295,8 @@ class TradingEngine:
         key: str,
         signal_enabled: Optional[bool] = None,
         ema_stop_enabled: Optional[bool] = None,
-        ema_reversal_enabled: Optional[bool] = None,
-        ema_reversal_qty: Optional[float] = None,
+        macd_reversal_enabled: Optional[bool] = None,
+        macd_reversal_qty: Optional[float] = None,
         macd_stop_enabled: Optional[bool] = None,
     ) -> dict:
         """更新单个合约的策略开关及参数，并持久化到 config.yaml。"""
@@ -1308,14 +1311,14 @@ class TradingEngine:
             monitor._ema_stop_enabled = ema_stop_enabled
             monitor.cfg.ema_stop_enabled = ema_stop_enabled
             logger.info(f"[{key}] 均线止损已{'启用' if ema_stop_enabled else '暂停'}")
-        if ema_reversal_enabled is not None:
-            monitor._ema_reversal_enabled = ema_reversal_enabled
-            monitor.cfg.ema_reversal_enabled = ema_reversal_enabled
-            logger.info(f"[{key}] EMA反转开仓已{'启用' if ema_reversal_enabled else '暂停'}")
-        if ema_reversal_qty is not None and ema_reversal_qty > 0:
-            monitor._ema_reversal_qty = ema_reversal_qty
-            monitor.cfg.ema_reversal_qty = ema_reversal_qty
-            logger.info(f"[{key}] EMA反转手数更新: {ema_reversal_qty}")
+        if macd_reversal_enabled is not None:
+            monitor._macd_reversal_enabled = macd_reversal_enabled
+            monitor.cfg.macd_reversal_enabled = macd_reversal_enabled
+            logger.info(f"[{key}] MACD反转开仓已{'启用' if macd_reversal_enabled else '暂停'}")
+        if macd_reversal_qty is not None and macd_reversal_qty > 0:
+            monitor._macd_reversal_qty = macd_reversal_qty
+            monitor.cfg.macd_reversal_qty = macd_reversal_qty
+            logger.info(f"[{key}] MACD反转手数更新: {macd_reversal_qty}")
         if macd_stop_enabled is not None:
             monitor._macd_stop_enabled = macd_stop_enabled
             monitor.cfg.macd_stop_enabled = macd_stop_enabled
@@ -1325,7 +1328,7 @@ class TradingEngine:
             "success": True,
             "signal_enabled": monitor._signal_enabled,
             "ema_stop_enabled": monitor._ema_stop_enabled,
-            "ema_reversal_enabled": monitor._ema_reversal_enabled,
-            "ema_reversal_qty": monitor._ema_reversal_qty,
+            "macd_reversal_enabled": monitor._macd_reversal_enabled,
+            "macd_reversal_qty": monitor._macd_reversal_qty,
             "macd_stop_enabled": monitor._macd_stop_enabled,
         }

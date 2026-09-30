@@ -164,8 +164,8 @@ async def update_contract_strategy(body: UpdateContractStrategyRequest, request:
         key=key,
         signal_enabled=body.signal_enabled,
         ema_stop_enabled=body.ema_stop_enabled,
-        ema_reversal_enabled=body.ema_reversal_enabled,
-        ema_reversal_qty=body.ema_reversal_qty,
+        macd_reversal_enabled=body.macd_reversal_enabled,
+        macd_reversal_qty=body.macd_reversal_qty,
         macd_stop_enabled=body.macd_stop_enabled,
     )
     if not result.get("success"):

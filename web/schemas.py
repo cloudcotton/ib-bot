@@ -53,8 +53,8 @@ class UpdateContractStrategyRequest(BaseModel):
     exchange: str
     signal_enabled: Optional[bool] = None
     ema_stop_enabled: Optional[bool] = None
-    ema_reversal_enabled: Optional[bool] = None
-    ema_reversal_qty: Optional[float] = None
+    macd_reversal_enabled: Optional[bool] = None
+    macd_reversal_qty: Optional[float] = None
     macd_stop_enabled: Optional[bool] = None
 
 
