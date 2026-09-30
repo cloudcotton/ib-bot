@@ -444,6 +444,9 @@ class ContractMonitor:
                 )
         except Exception as e:
             logger.error(f"[{self.cfg.key}] MACD趋势开仓异常: {e}")
+        finally:
+            # 无持仓直接开仓路径由 _check_macd_trend 置位，必须在此释放
+            self._in_flight = False
 
     async def _execute_open(self, direction: str, trigger_price: float) -> None:
         """市价开仓（抄底/摸顶），双K止损启用时自动跟踪止损。"""
